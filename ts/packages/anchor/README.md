@@ -1,9 +1,9 @@
-# @coral-xyz/anchor
+# light-anchor
 
 [![npm](https://img.shields.io/npm/v/@coral-xyz/anchor.svg?color=blue)](https://www.npmjs.com/package/@coral-xyz/anchor)
 [![Docs](https://img.shields.io/badge/docs-typedoc-blue)](https://coral-xyz.github.io/anchor/ts/index.html)
 
-TypeScript client for Anchor programs.
+Light Protocol's fork of TypeScript client for Anchor programs.
 
 ## Note
 
