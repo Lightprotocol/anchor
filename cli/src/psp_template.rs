@@ -313,6 +313,7 @@ use light_verifier_sdk::{{
     light_app_transaction::AppTransaction,
     light_transaction::{{Config, Transaction}},
 }};
+use solana_program::sysvar;
 
 #[derive(Clone)]
 pub struct TransactionsConfig;
@@ -376,6 +377,26 @@ pub fn process_psp_instruction_third<'a, 'b, 'c, 'info>(
     proof_b_verifier: &'a [u8; 128],
     proof_c_verifier: &'a [u8; 64],
 ) -> Result<()> {{
+    // enforce current slot public input
+    let current_slot = <Clock as sysvar::Sysvar>::get()?.slot;
+    msg!(
+        "{{}} > {{}}",
+        current_slot,
+        u64::from_be_bytes(
+            ctx.accounts.verifier_state.checked_public_inputs[2][24..32]
+                .try_into()
+                .unwrap(),
+        )
+    );
+    if current_slot
+        < u64::from_be_bytes(
+            ctx.accounts.verifier_state.checked_public_inputs[2][24..32]
+                .try_into()
+                .unwrap(),
+        )
+    {{
+        panic!("Escrow still locked");
+    }}
     // verify app proof
     let mut app_verifier = AppTransaction::<TransactionsConfig>::new(
         proof_a_app,
