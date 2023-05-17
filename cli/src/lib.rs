@@ -77,7 +77,7 @@ pub enum Command {
         #[clap(long)]
         jest: bool,
     },
-    /// Initializes a light private solana program workspace.
+    /// Initializes a Light Protocol PSP workspace.
     InitPsp {
         name: String,
         #[clap(short, long)]
