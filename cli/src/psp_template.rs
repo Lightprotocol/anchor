@@ -81,10 +81,10 @@ default = []
 [dependencies]
 anchor-lang = "0.26.0"
 anchor-spl = "0.26.0"
-merkle_tree_program = {{ version = "0.1.0", features = ["cpi"] }}
-verifier_program_two = {{ version = "0.1.0", features = ["cpi"] }}
+merkle_tree_program = {{ git="https://github.com/lightprotocol/light-protocol", features = ["cpi"], rev="c8eabcc2ac56d6daa27bf7aca9ec5fa93447a3d5"}}
+verifier_program_two = {{ git="https://github.com/lightprotocol/light-protocol", features = ["cpi"], rev="c8eabcc2ac56d6daa27bf7aca9ec5fa93447a3d5"}}
 light-macros = "0.1.0"
-light-verifier-sdk = "0.1.0"
+light-verifier-sdk = {{ git="https://github.com/lightprotocol/light-protocol", rev="c8eabcc2ac56d6daa27bf7aca9ec5fa93447a3d5"}}
 solana-program = "1.15.2"
 groth16-solana = "0.0.1"
 "#,
@@ -193,7 +193,7 @@ pub mod verifying_key;
 pub use verifying_key::*;
 
 use crate::processor::{{
-    process_{1}_instruction_first, process_{1}_instruction_third,
+    process_psp_instruction_first, process_psp_instruction_third,
 }};
 use anchor_lang::prelude::*;
 pub use processor::*;
@@ -212,13 +212,13 @@ pub mod {1} {{
     /// It creates and initializes a verifier state account to save state of a verification during
     /// computation verifying the zero-knowledge proof (ZKP). Additionally, it stores other data
     /// such as leaves, amounts, recipients, nullifiers, etc. to execute the protocol logic
-    /// in the last transaction after successful ZKP verification. light_verifier_sdk::light_instruction::LightInstruction2
-    pub fn {1}_instruction_first<'a, 'b, 'c, 'info>(
-        ctx: Context<'a, 'b, 'c, 'info, LightInstructionFirst<'info>>,
+    /// in the last transaction after successful ZKP verification. light_verifier_sdk::light_instruction::PspInstruction2
+    pub fn psp_instruction_first<'a, 'b, 'c, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, PspInstructionFirst<'info>>,
         inputs: Vec<u8>,
     ) -> Result<()> {{
-        let inputs_des: InstructionDataLightInstructionFirst =
-            InstructionDataLightInstructionFirst::try_deserialize_unchecked(
+        let inputs_des: InstructionDataPspInstructionFirst =
+            InstructionDataPspInstructionFirst::try_deserialize_unchecked(
                 &mut inputs.as_slice(),
             )?;
         let proof_a = [0u8; 64];
@@ -233,7 +233,7 @@ pub mod {1} {{
             .concat(),
             inputs_des.transaction_hash.to_vec(),
         ];
-        process_{1}_instruction_first(
+        process_psp_instruction_first(
             ctx,
             &proof_a,
             &proof_b,
@@ -250,8 +250,8 @@ pub mod {1} {{
         )
     }}
 
-    pub fn {1}_instruction_second<'a, 'b, 'c, 'info>(
-        ctx: Context<'a, 'b, 'c, 'info, LightInstructionSecond<'info>>,
+    pub fn psp_instruction_second<'a, 'b, 'c, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, PspInstructionSecond<'info>>,
         inputs: Vec<u8>,
     ) -> Result<()> {{
         // cut off discriminator
@@ -271,14 +271,14 @@ pub mod {1} {{
     /// This instruction is the third and final step of a shielded transaction.
     /// The proof is verified with the parameters saved in the first transaction.
     /// At successful verification protocol logic is executed.
-    pub fn {1}_instruction_third<'a, 'b, 'c, 'info>(
-        ctx: Context<'a, 'b, 'c, 'info, LightInstructionThird<'info>>,
+    pub fn psp_instruction_third<'a, 'b, 'c, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, PspInstructionThird<'info>>,
         inputs: Vec<u8>,
     ) -> Result<()> {{
-        let inputs_des: InstructionDataLightInstructionThird =
-            InstructionDataLightInstructionThird::try_deserialize(&mut inputs.as_slice())?;
+        let inputs_des: InstructionDataPspInstructionThird =
+            InstructionDataPspInstructionThird::try_deserialize(&mut inputs.as_slice())?;
 
-        process_{1}_instruction_third(
+        process_psp_instruction_third(
             ctx,
             &inputs_des.proof_a_app,
             &inputs_des.proof_b_app,
@@ -301,11 +301,11 @@ pub mod {1} {{
     )
 }
 
-pub fn processor_rs_psp(name: &str) -> String {
+pub fn processor_rs_psp(_name: &str) -> String {
     format!(
         r#"use crate::verifying_key::VERIFYINGKEY;
-use crate::LightInstructionFirst;
-use crate::LightInstructionThird;
+use crate::PspInstructionFirst;
+use crate::PspInstructionThird;
 use anchor_lang::prelude::*;
 use light_macros::pubkey;
 use light_verifier_sdk::light_transaction::VERIFIER_STATE_SEED;
@@ -325,8 +325,8 @@ impl Config for TransactionsConfig {{
     const ID: Pubkey = pubkey!("{0}");
 }}
 
-pub fn process_{1}_instruction_first<'a, 'b, 'c, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, LightInstructionFirst<'info>>,
+pub fn process_psp_instruction_first<'a, 'b, 'c, 'info>(
+    ctx: Context<'a, 'b, 'c, 'info, PspInstructionFirst<'info>>,
     proof_a: &'a [u8; 64],
     proof_b: &'a [u8; 128],
     proof_c: &'a [u8; 64],
@@ -367,8 +367,8 @@ pub fn process_{1}_instruction_first<'a, 'b, 'c, 'info>(
     Ok(())
 }}
 
-pub fn process_{1}_instruction_third<'a, 'b, 'c, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, LightInstructionThird<'info>>,
+pub fn process_psp_instruction_third<'a, 'b, 'c, 'info>(
+    ctx: Context<'a, 'b, 'c, 'info, PspInstructionThird<'info>>,
     proof_a_app: &'a [u8; 64],
     proof_b_app: &'a [u8; 128],
     proof_c_app: &'a [u8; 64],
@@ -446,7 +446,6 @@ pub fn process_{1}_instruction_third<'a, 'b, 'c, 'info>(
     )
 }}"#,
         default_program_id(),
-        name.to_snake_case(),
     )
 }
 
@@ -499,7 +498,8 @@ pub fn ts_package_json_psp(jest: bool, name: &str) -> String {
         "scripts": {{
             "lint:fix": "prettier */*.js \"*/**/*{{.js,.ts}}\" -w",
             "lint": "prettier */*.js \"*/**/*{{.js,.ts}}\" --check",
-            "test": "ts-mocha --resolveJsonModule ./tsconfig.json -t 100000000 tests/{}.ts --exit"
+            "test": "light test --projectName {0} --programAddress {1}",
+            "build": "light build --name {0}"
         }},
         "dependencies": {{
             "@coral-xyz/anchor": "^{VERSION}"
@@ -514,7 +514,8 @@ pub fn ts_package_json_psp(jest: bool, name: &str) -> String {
         }}
     }}
     "#,
-            name
+            name,
+            default_program_id()
         )
     } else {
         format!(
@@ -522,13 +523,14 @@ pub fn ts_package_json_psp(jest: bool, name: &str) -> String {
     "scripts": {{
         "lint:fix": "prettier */*.js \"*/**/*{{.js,.ts}}\" -w",
         "lint": "prettier */*.js \"*/**/*{{.js,.ts}}\" --check",
-        "test": "ts-mocha --resolveJsonModule ./tsconfig.json -t 100000000 tests/{}.ts --exit"
+        "test": "light test --testCommand {0} --programName {1} --programAddress {2}",
+        "build": "light build --name {1}"
     }},
     "dependencies": {{
         "@coral-xyz/anchor": "^{VERSION}",
         "circomlib": "^2.0.5",
         "circomlibjs": "^0.1.7",
-        "light-sdk": "^0.0.1"
+        "light-sdk": "git+https://github.com/lightprotocol/light-protocol.git#v0.3.0"
     }},
     "devDependencies": {{
         "chai": "^4.3.4",
@@ -542,7 +544,9 @@ pub fn ts_package_json_psp(jest: bool, name: &str) -> String {
     }}
 }}
 "#,
-            name
+            name,
+            name.to_snake_case(),
+            default_program_id()
         )
     }
 }
@@ -551,18 +555,24 @@ pub fn ts_mocha_psp(name: &str) -> String {
     format!(
         r#"import * as anchor from "@coral-xyz/anchor";
 
+import * as anchor from "@coral-xyz/anchor";
+import {{assert}} from "chai";
 import {{
-  Utxo,
-  Transaction,
-  TRANSACTION_MERKLE_TREE_KEY,
-  TransactionParameters,
-  Provider as LightProvider,
-  confirmConfig,
-  Action,
-  IDL_VERIFIER_PROGRAM_TWO,
-  User,
-  ProgramUtxoBalance,
-  airdropSol,
+    Utxo,
+    Transaction,
+    TRANSACTION_MERKLE_TREE_KEY,
+    TransactionParameters,
+    Provider as LightProvider,
+    confirmConfig,
+    Action,
+    TestRelayer,
+    User,
+    ProgramUtxoBalance,
+    airdropSol,
+    LOOK_UP_TABLE,
+    verifierProgramStorageProgramId,
+    verifierProgramTwoProgramId,
+    ProgramParameters
 }} from "light-sdk";
 import {{
   Keypair as SolanaKeypair,
@@ -573,7 +583,7 @@ import {{
 
 import {{ buildPoseidonOpt }} from "circomlibjs";
 import {{ BN }} from "@coral-xyz/anchor";
-import {{ IDL }} from "../target/types/{}";
+import {{ IDL }} from "../target/types/{1}";
 const path = require("path");
 
 const verifierProgramId = new PublicKey(
@@ -595,17 +605,23 @@ describe("{}", () => {{
     POSEIDON = await buildPoseidonOpt();
   }});
 
-  it("Create and Spend Program Utxo ", async () => {{
+  
+it("Create and Spend Program Utxo ", async () => {{
     const wallet = Keypair.generate();
     await airdropSol({{
       provider,
-      amount: 10_000_000,
+      amount: 10_000_000_000,
       recipientPublicKey: wallet.publicKey,
     }});
 
+    let relayer = new TestRelayer(wallet.publicKey, LOOK_UP_TABLE, wallet.publicKey, new BN(100000))
+    await airdropSol({{provider, amount: 1_000_000_000, recipientPublicKey: Transaction.getRegisteredVerifierPda(TRANSACTION_MERKLE_TREE_KEY, verifierProgramStorageProgramId)}})
+    await airdropSol({{provider, amount: 1_000_000_000, recipientPublicKey: Transaction.getRegisteredVerifierPda(TRANSACTION_MERKLE_TREE_KEY, verifierProgramTwoProgramId)}})
+
     // The light provider is a connection and wallet abstraction.
     // The wallet is used to derive the seed for your shielded keypair with a signature.
-    const lightProvider = await LightProvider.init({{ wallet, url: RPC_URL }});
+    var lightProvider = await LightProvider.init({{ wallet, url: RPC_URL, relayer }});
+    lightProvider.addVerifierProgramPublickeyToLookUpTable(TransactionParameters.getVerifierProgramId(IDL));
 
     const user: User = await User.init({{ provider: lightProvider }});
 
@@ -617,6 +633,8 @@ describe("{}", () => {{
       appData: {{ releaseSlot: new BN(1) }},
       appDataIdl: IDL,
       verifierAddress: verifierProgramId,
+      assetLookupTable: lightProvider.lookUpTables.assetLookupTable,
+      verifierProgramLookupTable: lightProvider.lookUpTables.verifierProgramLookupTable
     }});
 
     const testInputsShield = {{
@@ -624,10 +642,11 @@ describe("{}", () => {{
       action: Action.SHIELD,
     }};
 
-    await user.storeAppUtxo({{
+    let storeTransaction = await user.storeAppUtxo({{
       appUtxo: testInputsShield.utxo,
       action: testInputsShield.action,
     }});
+    console.log("store program utxo transaction hash ", storeTransaction.txHash);
 
     const programUtxoBalance: Map<string, ProgramUtxoBalance> =
       await user.syncStorage(IDL);
@@ -638,45 +657,33 @@ describe("{}", () => {{
       .tokenBalances.get(testInputsShield.utxo.assets[1].toBase58())
       .utxos.get(shieldedUtxoCommitmentHash);
 
-    Utxo.equal(POSEIDON, inputUtxo, testInputsShield.utxo);
+    Utxo.equal(POSEIDON, inputUtxo, testInputsShield.utxo, true);
 
     const circuitPath = path.join("build-circuit");
-    const appParams = {{
-      inputs: {{ releaseSlot: new BN(1), currentSlot: new BN(1) }},
-      path: circuitPath,
+
+    const programParameters: ProgramParameters = {{
+      inputs: {{
+        releaseSlot: inputUtxo.appData.releaseSlot,
+        currentSlot: inputUtxo.appData.releaseSlot // for testing we can use the same value
+      }},
       verifierIdl: IDL,
+      path: circuitPath
     }};
 
-    const txParams = new TransactionParameters({{
-      inputUtxos: [inputUtxo],
-      transactionMerkleTreePubkey: TRANSACTION_MERKLE_TREE_KEY,
-      recipientSol: SolanaKeypair.generate().publicKey,
-      action: Action.UNSHIELD,
-      poseidon: POSEIDON,
-      relayer: lightProvider.relayer,
-      transactionNonce: user.balance.transactionNonce,
-      verifierIdl: IDL_VERIFIER_PROGRAM_TWO,
+    let {{txHash}} = await user.executeAppUtxo({{
+      appUtxo: inputUtxo,
+      programParameters,
+      action: Action.TRANSFER,
     }});
-
-    let tx = new Transaction({{
-      provider: lightProvider,
-      params: txParams,
-      appParams,
-    }});
-
-    await tx.compile();
-    await tx.getProof();
-    await tx.getAppProof();
-    let signature = await tx.sendAndConfirmTransaction();
-    console.log("signature ", signature);
+    console.log("transaction hash ", txHash);
+    const utxoSpent = await user.getUtxo(inputUtxo.getCommitment(POSEIDON), true, IDL);
+    assert.equal(utxoSpent.status, "spent");
+    Utxo.equal(POSEIDON, utxoSpent.utxo, inputUtxo, true);
   }});
 }});
 "#,
         name.to_upper_camel_case(),
         name.to_snake_case(),
-        // name,
-        // name.to_upper_camel_case(),
-        // name.to_upper_camel_case(),
     )
 }
 
