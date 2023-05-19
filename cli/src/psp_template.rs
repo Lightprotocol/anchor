@@ -892,13 +892,12 @@ include "../node_modules/circomlib/circuits/comparators.circom";
 
 #[lightTransaction(verifierTwo)]
 template {}() {{
-    // defines the data which is saved in the utxo
-    // this data is defined at utxo creation
-    // is checked that only utxos with instructionData = hash or 0
-    // exist in input utxos
-    // is outside instruction
-    // could add signal inputs automatically for these
-    // are private inputs
+    // utxoData:
+    // - defines the data which is saved in the utxo
+    // - this data is defined at utxo creation
+    // - is checked that only utxos with instructionData = hash or 0
+    // - exist in input utxos
+    // - are private inputs
     #[utxoData]
     {{
         releaseSlot
@@ -906,10 +905,6 @@ template {}() {{
     signal input currentSlot;
     currentSlot === releaseSlot;
 }}
-// throw error when no utxoData -> doesn't make sense
-// throw error if is declared twice
-// throw error when there is no #[instance]
-// throw error when there is no #[lightTransaction(verifierTwo)]
 "#,
         name.to_lower_camel_case(),
         name.to_lower_camel_case()
