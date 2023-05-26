@@ -27,3 +27,9 @@ solana-program = "1.13.5"
 spl-token = { version = "3.5.0", features = ["no-entrypoint"], optional = true }
 spl-associated-token-account = { version = "1.1.1", features = ["no-entrypoint"], optional = true }
 mpl-token-metadata = { version = "1.4.3", optional = true, features = ["no-entrypoint"] }
+
+# TODO: Remove after Solana release v1.16
+# Latest solana version(1.14.17) as of 2023-05-01 comes with rustc 1.62.0-dev but MSRV for latest
+# version of this crate is 1.64.0. See https://github.com/solana-labs/solana/pull/31418
+winnow = "=0.4.1"
+toml_datetime = "=0.6.1"
