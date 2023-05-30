@@ -1901,14 +1901,12 @@ fn cd_member(cfg_override: &ConfigOverride, program_name: &str) -> Result<()> {
 }
 
 pub fn verify_bin(program_id: Pubkey, bin_path: &Path, cluster: &str) -> Result<BinVerification> {
-    let client = RpcClient::new(cluster.to_string());
+    // Use `finalized` state for verify
+    let client = RpcClient::new_with_commitment(cluster, CommitmentConfig::finalized());
 
     // Get the deployed build artifacts.
     let (deployed_bin, state) = {
-        let account = client
-            .get_account_with_commitment(&program_id, CommitmentConfig::default())?
-            .value
-            .map_or(Err(anyhow!("Program account not found")), Ok)?;
+        let account = client.get_account(&program_id)?;
         if account.owner == bpf_loader::id() || account.owner == bpf_loader_deprecated::id() {
             let bin = account.data.to_vec();
             let state = BinVerificationState::ProgramData {
@@ -1921,13 +1919,7 @@ pub fn verify_bin(program_id: Pubkey, bin_path: &Path, cluster: &str) -> Result<
                 UpgradeableLoaderState::Program {
                     programdata_address,
                 } => {
-                    let account = client
-                        .get_account_with_commitment(
-                            &programdata_address,
-                            CommitmentConfig::default(),
-                        )?
-                        .value
-                        .map_or(Err(anyhow!("Program data account not found")), Ok)?;
+                    let account = client.get_account(&programdata_address)?;
                     let bin = account.data
                         [UpgradeableLoaderState::size_of_programdata_metadata()..]
                         .to_vec();
@@ -2016,19 +2008,12 @@ fn fetch_idl(cfg_override: &ConfigOverride, idl_addr: Pubkey) -> Result<Idl> {
         }
     };
 
-    let client = RpcClient::new(url);
+    let client = create_client(url);
 
-    let mut account = client
-        .get_account_with_commitment(&idl_addr, CommitmentConfig::processed())?
-        .value
-        .map_or(Err(anyhow!("IDL account not found")), Ok)?;
-
+    let mut account = client.get_account(&idl_addr)?;
     if account.executable {
         let idl_addr = IdlAccount::address(&idl_addr);
-        account = client
-            .get_account_with_commitment(&idl_addr, CommitmentConfig::processed())?
-            .value
-            .map_or(Err(anyhow!("IDL account not found")), Ok)?;
+        account = client.get_account(&idl_addr)?;
     }
 
     // Cut off account discriminator.
@@ -2172,7 +2157,7 @@ fn idl_set_buffer(
         let keypair = solana_sdk::signature::read_keypair_file(&cfg.provider.wallet.to_string())
             .map_err(|_| anyhow!("Unable to read keypair file"))?;
         let url = cluster_url(cfg, &cfg.test_validator);
-        let client = RpcClient::new(url);
+        let client = create_client(url);
 
         let idl_address = IdlAccount::address(&program_id);
         let idl_authority = if print_only {
@@ -2209,10 +2194,7 @@ fn idl_set_buffer(
             );
 
             // Send the transaction.
-            client.send_and_confirm_transaction_with_spinner_and_commitment(
-                &tx,
-                CommitmentConfig::confirmed(),
-            )?;
+            client.send_and_confirm_transaction_with_spinner(&tx)?;
         }
 
         Ok(())
@@ -2231,12 +2213,9 @@ fn idl_upgrade(
 fn idl_authority(cfg_override: &ConfigOverride, program_id: Pubkey) -> Result<()> {
     with_workspace(cfg_override, |cfg| {
         let url = cluster_url(cfg, &cfg.test_validator);
-        let client = RpcClient::new(url);
+        let client = create_client(url);
         let idl_address = {
-            let account = client
-                .get_account_with_commitment(&program_id, CommitmentConfig::processed())?
-                .value
-                .map_or(Err(anyhow!("Account not found")), Ok)?;
+            let account = client.get_account(&program_id)?;
             if account.executable {
                 IdlAccount::address(&program_id)
             } else {
@@ -2268,7 +2247,7 @@ fn idl_set_authority(
         let keypair = solana_sdk::signature::read_keypair_file(&cfg.provider.wallet.to_string())
             .map_err(|_| anyhow!("Unable to read keypair file"))?;
         let url = cluster_url(cfg, &cfg.test_validator);
-        let client = RpcClient::new(url);
+        let client = create_client(url);
 
         let idl_authority = if print_only {
             get_idl_account(&client, &idl_address)?.authority
@@ -2304,10 +2283,7 @@ fn idl_set_authority(
                 &[&keypair],
                 latest_hash,
             );
-            client.send_and_confirm_transaction_with_spinner_and_commitment(
-                &tx,
-                CommitmentConfig::confirmed(),
-            )?;
+            client.send_and_confirm_transaction_with_spinner(&tx)?;
 
             println!("Authority update complete.");
         }
@@ -2341,7 +2317,7 @@ fn idl_close_account(
     let keypair = solana_sdk::signature::read_keypair_file(&cfg.provider.wallet.to_string())
         .map_err(|_| anyhow!("Unable to read keypair file"))?;
     let url = cluster_url(cfg, &cfg.test_validator);
-    let client = RpcClient::new(url);
+    let client = create_client(url);
 
     let idl_authority = if print_only {
         get_idl_account(&client, &idl_address)?.authority
@@ -2372,10 +2348,7 @@ fn idl_close_account(
             &[&keypair],
             latest_hash,
         );
-        client.send_and_confirm_transaction_with_spinner_and_commitment(
-            &tx,
-            CommitmentConfig::confirmed(),
-        )?;
+        client.send_and_confirm_transaction_with_spinner(&tx)?;
     }
 
     Ok(())
@@ -2393,7 +2366,7 @@ fn idl_write(cfg: &Config, program_id: &Pubkey, idl: &Idl, idl_address: Pubkey) 
     let keypair = solana_sdk::signature::read_keypair_file(&cfg.provider.wallet.to_string())
         .map_err(|_| anyhow!("Unable to read keypair file"))?;
     let url = cluster_url(cfg, &cfg.test_validator);
-    let client = RpcClient::new(url);
+    let client = create_client(url);
 
     // Serialize and compress the idl.
     let idl_data = {
@@ -2433,10 +2406,7 @@ fn idl_write(cfg: &Config, program_id: &Pubkey, idl: &Idl, idl_address: Pubkey) 
             &[&keypair],
             latest_hash,
         );
-        client.send_and_confirm_transaction_with_spinner_and_commitment(
-            &tx,
-            CommitmentConfig::confirmed(),
-        )?;
+        client.send_and_confirm_transaction_with_spinner(&tx)?;
         offset += MAX_WRITE_SIZE;
     }
     Ok(())
@@ -2562,7 +2532,7 @@ fn account(
         .unwrap_or(Cluster::Localnet);
     cluster = cfg_override.cluster.as_ref().unwrap_or(cluster);
 
-    let data = RpcClient::new(cluster.url()).get_account_data(&address)?;
+    let data = create_client(cluster.url()).get_account_data(&address)?;
     if data.len() < 8 {
         return Err(anyhow!(
             "The account has less than 8 bytes and is not an Anchor account."
@@ -3026,7 +2996,7 @@ fn validator_flags(
                 } else if key == "clone" {
                     // Client for fetching accounts data
                     let client = if let Some(url) = entries["url"].as_str() {
-                        RpcClient::new(url.to_string())
+                        create_client(url)
                     } else {
                         return Err(anyhow!(
                             "Validator url for Solana's JSON RPC should be provided in order to clone accounts from it"
@@ -3045,12 +3015,7 @@ fn validator_flags(
                         .collect::<Result<HashSet<Pubkey>>>()?;
 
                     let accounts_keys = pubkeys.iter().cloned().collect::<Vec<_>>();
-                    let accounts = client
-                        .get_multiple_accounts_with_commitment(
-                            &accounts_keys,
-                            CommitmentConfig::default(),
-                        )?
-                        .value;
+                    let accounts = client.get_multiple_accounts(&accounts_keys)?;
 
                     // Check if there are program accounts
                     for (account, acc_key) in accounts.iter().zip(accounts_keys) {
@@ -3158,7 +3123,6 @@ fn start_test_validator(
     flags: Option<Vec<String>>,
     test_log_stdout: bool,
 ) -> Result<Child> {
-    //
     let (test_ledger_directory, test_ledger_log_filename) =
         test_validator_file_paths(test_validator);
 
@@ -3210,7 +3174,7 @@ fn start_test_validator(
         .map_err(|e| anyhow::format_err!("{}", e.to_string()))?;
 
     // Wait for the validator to be ready.
-    let client = RpcClient::new(rpc_url);
+    let client = create_client(rpc_url);
     let mut count = 0;
     let ms_wait = test_validator
         .as_ref()
@@ -3446,7 +3410,7 @@ fn create_idl_account(
     let keypair = solana_sdk::signature::read_keypair_file(keypair_path)
         .map_err(|_| anyhow!("Unable to read keypair file"))?;
     let url = cluster_url(cfg, &cfg.test_validator);
-    let client = RpcClient::new(url);
+    let client = create_client(url);
     let idl_data = serialize_idl(idl)?;
 
     // Run `Create instruction.
@@ -3501,10 +3465,7 @@ fn create_idl_account(
             &[&keypair],
             latest_hash,
         );
-        client.send_and_confirm_transaction_with_spinner_and_commitment(
-            &tx,
-            CommitmentConfig::finalized(),
-        )?;
+        client.send_and_confirm_transaction_with_spinner(&tx)?;
     }
 
     // Write directly to the IDL account buffer.
@@ -3522,7 +3483,7 @@ fn create_idl_buffer(
     let keypair = solana_sdk::signature::read_keypair_file(keypair_path)
         .map_err(|_| anyhow!("Unable to read keypair file"))?;
     let url = cluster_url(cfg, &cfg.test_validator);
-    let client = RpcClient::new(url);
+    let client = create_client(url);
 
     let buffer = Keypair::new();
 
@@ -3565,10 +3526,7 @@ fn create_idl_buffer(
     );
 
     // Send the transaction.
-    client.send_and_confirm_transaction_with_spinner_and_commitment(
-        &tx,
-        CommitmentConfig::confirmed(),
-    )?;
+    client.send_and_confirm_transaction_with_spinner(&tx)?;
 
     Ok(buffer.pubkey())
 }
@@ -4221,6 +4179,11 @@ fn strip_workspace_prefix(absolute_path: String) -> String {
         .strip_prefix(&workspace_prefix)
         .unwrap_or(&absolute_path)
         .into()
+}
+
+/// Create a new [`RpcClient`] with `confirmed` commitment level instead of the default(finalized).
+fn create_client<U: ToString>(url: U) -> RpcClient {
+    RpcClient::new_with_commitment(url, CommitmentConfig::confirmed())
 }
 
 #[cfg(test)]
