@@ -796,6 +796,9 @@ fn init_psp(
     // We need to format different cases for the dir and the name
     let rust_name = name.to_snake_case();
     let project_name = if name == rust_name {
+        // The clone is necessary here, because `rust_name` gets borrowed later.
+        // Clippy seems to not be able to notice that.
+        #[allow(clippy::redundant_clone)]
         rust_name.clone()
     } else {
         name.to_kebab_case()
