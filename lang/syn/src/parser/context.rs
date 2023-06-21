@@ -1,9 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{collections::BTreeMap, path::Path};
 
+use anchor_expand::expand_program;
 use anyhow::anyhow;
 use syn::{Ident, ImplItem, ImplItemConst, Type, TypePath};
 
@@ -51,10 +48,12 @@ impl CrateContext {
 
     pub fn parse(
         root: impl AsRef<Path>,
+        package_name: &str,
+        version: &str,
         features: &Option<Vec<String>>,
     ) -> Result<Self, anyhow::Error> {
         Ok(CrateContext {
-            modules: ParsedModule::parse_recursive(root.as_ref(), features)?,
+            modules: ParsedModule::parse_recursive(root.as_ref(), package_name, version, features)?,
         })
     }
 
@@ -115,29 +114,19 @@ struct ParsedModule {
 impl ParsedModule {
     fn parse_recursive(
         root: &Path,
+        package_name: &str,
+        version: &str,
         features: &Option<Vec<String>>,
     ) -> Result<BTreeMap<String, ParsedModule>, anyhow::Error> {
         let mut modules = BTreeMap::new();
 
-        let mut args = vec![
-            "+nightly".to_owned(),
-            "rustc".to_owned(),
-            "--profile=check".to_owned(),
-        ];
+        let mut args = Vec::with_capacity(2);
         if let Some(features) = features {
             args.push("--features".to_owned());
             args.push(features.join(","));
         }
-        args.extend(vec!["--".to_owned(), "-Zunpretty=expanded".to_owned()]);
-
-        let root_content = String::from_utf8(
-            Command::new("cargo")
-                .args(args)
-                .current_dir(root)
-                .stderr(Stdio::inherit())
-                .output()?
-                .stdout,
-        )?;
+        let root_content = expand_program(root.to_path_buf(), package_name, version, None, &args)?;
+        let root_content = String::from_utf8(root_content)?;
 
         let root_file = syn::parse_file(&root_content)?;
         let root_mod = Self::new("crate".to_owned(), root_file.items);

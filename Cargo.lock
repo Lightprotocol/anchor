@@ -2609,6 +2609,7 @@ dependencies = [
  "flate2",
  "heck 0.4.1",
  "light-anchor-client",
+ "light-anchor-expand",
  "light-anchor-lang",
  "light-anchor-syn",
  "pathdiff",
@@ -2647,6 +2648,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "light-anchor-expand"
+version = "0.28.0"
+dependencies = [
+ "anyhow",
+ "cargo_toml",
+ "chrono",
+ "heck 0.4.1",
+ "serde_json",
 ]
 
 [[package]]
@@ -2694,6 +2706,7 @@ dependencies = [
  "cargo",
  "cargo_metadata",
  "heck 0.3.3",
+ "light-anchor-expand",
  "proc-macro2 1.0.60",
  "quote 1.0.28",
  "serde",

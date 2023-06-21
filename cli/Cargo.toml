@@ -18,6 +18,7 @@ default = []
 
 [dependencies]
 anchor-client = { path = "../client", version = "0.28.0", package = "light-anchor-client" }
+anchor-expand = { path = "../lang/expand", version = "0.28.0", package = "light-anchor-expand" }
 anchor-lang = { path = "../lang", version = "0.28.0", package = "light-anchor-lang" }
 anchor-syn = { path = "../lang/syn", features = ["event-cpi", "idl", "init-if-needed"], version = "0.28.0", package = "light-anchor-syn" }
 anyhow = "1.0.32"

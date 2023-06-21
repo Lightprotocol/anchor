@@ -12,6 +12,7 @@ members = [
     "lang",
     "lang/attribute/*",
     "lang/derive/*",
+    "lang/expand",
     "lang/syn",
     "spl",
 ]

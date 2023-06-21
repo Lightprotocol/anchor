@@ -4,6 +4,7 @@ use crate::config::{
     STARTUP_WAIT,
 };
 use anchor_client::Cluster;
+use anchor_expand::expand_program;
 use anchor_lang::idl::{IdlAccount, IdlInstruction, ERASED_AUTHORITY};
 use anchor_lang::{AccountDeserialize, AnchorDeserialize, AnchorSerialize};
 use anchor_syn::idl::{EnumFields, Idl, IdlType, IdlTypeDefinitionTy};
@@ -1084,12 +1085,17 @@ pub fn expand(
             expand_all(&workspace_cfg, expansions_path, cargo_args)
         }
         // Reaching this arm means Cargo.toml belongs to a single package. Expand it.
-        Some((_, cargo)) => expand_program(
-            // If we found Cargo.toml, it must be in a directory so unwrap is safe
-            cargo.path().parent().unwrap().to_path_buf(),
-            expansions_path,
-            cargo_args,
-        ),
+        Some((_, cargo)) => {
+            expand_program(
+                // If we found Cargo.toml, it must be in a directory so unwrap is safe
+                cargo.path().parent().unwrap().to_path_buf(),
+                &cargo.package().name,
+                cargo.package().version(),
+                Some(expansions_path),
+                cargo_args,
+            )?;
+            Ok(())
+        }
     }
 }
 
@@ -1100,57 +1106,16 @@ fn expand_all(
 ) -> Result<()> {
     let cur_dir = std::env::current_dir()?;
     for p in workspace_cfg.get_rust_program_list()? {
-        expand_program(p, expansions_path.clone(), cargo_args)?;
+        let cargo = Manifest::from_path(p.join("Cargo.toml"))?;
+        expand_program(
+            p,
+            &cargo.package().name,
+            cargo.package().version(),
+            Some(expansions_path.clone()),
+            cargo_args,
+        )?;
     }
     std::env::set_current_dir(cur_dir)?;
-    Ok(())
-}
-
-fn expand_program(
-    program_path: PathBuf,
-    expansions_path: PathBuf,
-    cargo_args: &[String],
-) -> Result<()> {
-    let cargo = Manifest::from_path(program_path.join("Cargo.toml"))
-        .map_err(|_| anyhow!("Could not find Cargo.toml for program"))?;
-
-    let target_dir_arg = {
-        let mut target_dir_arg = OsString::from("--target-dir=");
-        target_dir_arg.push(expansions_path.join("expand-target"));
-        target_dir_arg
-    };
-
-    let package_name = &cargo
-        .package
-        .as_ref()
-        .ok_or_else(|| anyhow!("Cargo config is missing a package"))?
-        .name;
-    let program_expansions_path = expansions_path.join(package_name);
-    fs::create_dir_all(&program_expansions_path)?;
-
-    let exit = std::process::Command::new("cargo")
-        .arg("expand")
-        .arg(target_dir_arg)
-        .arg(&format!("--package={package_name}"))
-        .args(cargo_args)
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| anyhow::format_err!("{}", e.to_string()))?;
-    if !exit.status.success() {
-        eprintln!("'anchor expand' failed. Perhaps you have not installed 'cargo-expand'? https://github.com/dtolnay/cargo-expand#installation");
-        std::process::exit(exit.status.code().unwrap_or(1));
-    }
-
-    let version = cargo.version();
-    let time = chrono::Utc::now().to_string().replace(' ', "_");
-    let file_path = program_expansions_path.join(format!("{package_name}-{version}-{time}.rs"));
-    fs::write(&file_path, &exit.stdout).map_err(|e| anyhow::format_err!("{}", e.to_string()))?;
-
-    println!(
-        "Expanded {} into file {}\n",
-        package_name,
-        file_path.to_string_lossy()
-    );
     Ok(())
 }
 
@@ -2068,9 +2033,10 @@ fn extract_idl(
     let (crate_root, cargo) = Manifest::discover_from_path(manifest_from_path)?
         .ok_or_else(|| anyhow!("Cargo.toml not found"))?;
     anchor_syn::idl::file::parse(
+        &cargo.package().name,
         crate_root,
         cargo.path().to_path_buf(),
-        cargo.version(),
+        &cargo.version(),
         cfg.features.seeds,
         no_docs,
         !(cfg.features.skip_lint || skip_lint),

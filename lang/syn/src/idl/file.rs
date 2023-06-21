@@ -25,14 +25,15 @@ const ERROR_CODE_OFFSET: u32 = 6000;
 
 // Parse an entire interface file.
 pub fn parse(
+    package_name: &str,
     crate_root: PathBuf,
     cargo_path: PathBuf,
-    version: String,
+    version: &str,
     seeds_feature: bool,
     no_docs: bool,
     safety_checks: bool,
 ) -> Result<Option<Idl>> {
-    let ctx = CrateContext::parse(crate_root, &None)?;
+    let ctx = CrateContext::parse(crate_root, package_name, version, &None)?;
     if safety_checks {
         ctx.safety_checks()?;
     }
@@ -210,7 +211,12 @@ pub fn parse(
             };
 
             let mut parsed_types = HashSet::new();
-            let crate_ctx = CrateContext::parse(&dependency.path, &dependency.features)?;
+            let crate_ctx = CrateContext::parse(
+                &dependency.path,
+                &dependency.package_name,
+                &dependency.version,
+                &dependency.features,
+            )?;
             let (_, account_serialize_impls, borsh_serialize_impls) = parse_impls(&crate_ctx);
             let ty_defs = parse_ty_defs(
                 &crate_ctx,
@@ -238,7 +244,7 @@ pub fn parse(
         .collect::<Result<Vec<IdlConst>, _>>()?;
 
     Ok(Some(Idl {
-        version,
+        version: version.to_string(),
         name: p.name.to_string(),
         docs: p.docs.clone(),
         instructions,
@@ -257,7 +263,9 @@ pub fn parse(
 
 /// Dependency of a Rust crate (an another crate).
 struct CargoDependency {
+    package_name: String,
     path: PathBuf,
+    version: String,
     features: Option<Vec<String>>,
 }
 
@@ -302,7 +310,9 @@ where
                 (
                     package.name.clone(),
                     CargoDependency {
+                        package_name: package.name.clone(),
                         path: cache_dir.to_path_buf().into_std_path_buf(),
+                        version: package.version.to_string(),
                         features: dependency_features.get(&package.name).cloned(),
                     },
                 )

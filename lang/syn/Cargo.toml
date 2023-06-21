@@ -19,6 +19,7 @@ seeds = []
 event-cpi = []
 
 [dependencies]
+anchor-expand = { path = "../expand", package = "light-anchor-expand" }
 anyhow = "1"
 bs58 = "0.5"
 heck = "0.3"
