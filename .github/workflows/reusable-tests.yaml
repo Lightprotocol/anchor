@@ -81,10 +81,6 @@ jobs:
           path: ${{ env.CARGO_CACHE_PATH }}
           key: cargo-${{ runner.os }}-${{ env.CARGO_PROFILE }}-anchor-${{ hashFiles('**/Cargo.lock') }}
 
-      # TODO(vadorovsky): Think of smarter way or requiring/shipping Rust nightly
-      # together with light-anchor.
-      - run: rustup toolchain install nightly
-
       - run: cargo install --path cli light-anchor-cli --locked --force --debug
         if: env.CARGO_PROFILE == 'debug'
       - run: cargo install --path cli light-anchor-cli --locked --force
