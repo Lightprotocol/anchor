@@ -120,7 +120,8 @@ impl ParsedModule {
     ) -> Result<BTreeMap<String, ParsedModule>, anyhow::Error> {
         let mut modules = BTreeMap::new();
 
-        let mut args = Vec::with_capacity(2);
+        let mut args = Vec::with_capacity(3);
+        args.push("--ugly".to_owned());
         if let Some(features) = features {
             args.push("--features".to_owned());
             args.push(features.join(","));
