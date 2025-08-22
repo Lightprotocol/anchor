@@ -12,7 +12,16 @@ use {
     std::ops::Deref,
 };
 
-static IDS: [Pubkey; 2] = [spl_token_interface::ID, spl_token_2022_interface::ID];
+pub const COMPRESSED_TOKEN_ID: Pubkey = Pubkey::new_from_array([
+    9, 21, 163, 87, 35, 121, 78, 143, 182, 93, 7, 91, 107, 114, 105, 156, 56, 221, 2, 229, 148,
+    139, 117, 176, 229, 160, 65, 142, 128, 151, 91, 68,
+]);
+
+static IDS: [Pubkey; 3] = [
+    spl_token_interface::ID,
+    spl_token_2022_interface::ID,
+    COMPRESSED_TOKEN_ID,
+];
 
 #[derive(Clone, Debug, Default, PartialEq, Copy)]
 pub struct TokenAccount(spl_token_2022::state::Account);
