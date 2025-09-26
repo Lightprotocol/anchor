@@ -158,7 +158,8 @@ pub fn generate(program: &Program) -> proc_macro2::TokenStream {
                     // Maybe set Solana return data.
                     #maybe_set_return_data
 
-                    // Exit routine.
+                    // Finalize then exit routine.
+                    anchor_lang::AccountsFinalize::finalize(&__accounts, __program_id, __remaining_accounts, __ix_data)?;
                     __accounts.exit(__program_id)
                 }
             }

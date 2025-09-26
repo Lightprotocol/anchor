@@ -332,6 +332,7 @@ fn is_field_primitive(f: &syn::Field) -> ParseResult<bool> {
         "Sysvar"
             | "AccountInfo"
             | "UncheckedAccount"
+            | "CMint"
             | "AccountLoader"
             | "Account"
             | "LazyAccount"
@@ -351,6 +352,7 @@ fn parse_ty(f: &syn::Field) -> ParseResult<(Ty, bool)> {
         "Sysvar" => Ty::Sysvar(parse_sysvar(&path)?),
         "AccountInfo" => Ty::AccountInfo,
         "UncheckedAccount" => Ty::UncheckedAccount,
+        "CMint" => Ty::CMint(parse_cmint_ty(&path)?),
         "AccountLoader" => Ty::AccountLoader(parse_program_account_loader(&path)?),
         "Account" => Ty::Account(parse_account_ty(&path)?),
         "LazyAccount" => Ty::LazyAccount(parse_lazy_account_ty(&path)?),
@@ -589,4 +591,17 @@ fn parse_sysvar(path: &syn::Path) -> ParseResult<SysvarTy> {
         }
     };
     Ok(ty)
+}
+
+fn parse_cmint_ty(_path: &syn::Path) -> ParseResult<CMintTy> {
+    // CMint doesn't take type parameters, just parse the constraints from #[account(...)]
+    // The constraints will be parsed separately in the constraints parser
+    Ok(CMintTy {
+        authority: None,
+        decimals: None,
+        mint_signer_seeds: None,
+        mint_signer_bump: None,
+        program_authority_seeds: None,
+        program_authority_bump: None,
+    })
 }

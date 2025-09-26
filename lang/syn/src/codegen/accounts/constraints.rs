@@ -86,6 +86,7 @@ pub fn linearize(c_group: &ConstraintGroup) -> Vec<Constraint> {
         token_account,
         mint,
         realloc,
+        cmint: _,
     } = c_group.clone();
 
     let mut constraints = Vec::new();
@@ -725,6 +726,7 @@ fn generate_constraint_init_group(
             decimals,
             freeze_authority,
             token_program,
+            compressed,
             group_pointer_authority,
             group_pointer_group_address,
             group_member_pointer_authority,
@@ -736,6 +738,7 @@ fn generate_constraint_init_group(
             transfer_hook_authority,
             transfer_hook_program_id,
         } => {
+            let is_compressed = compressed.unwrap_or(false);
             let token_program = match token_program {
                 Some(t) => t.to_token_stream(),
                 None => quote! {token_program},
@@ -929,104 +932,118 @@ fn generate_constraint_init_group(
                 seeds_with_bump,
             );
 
-            quote! {
-                // Define the bump and pda variable.
-                #find_pda
+            if is_compressed {
+                // Compressed mint path: do not create or initialize a traditional SPL mint.
+                // We only deserialize the provided account info and skip SPL checks.
+                quote! {
+                    // Define the bump and pda variable (still computed if seeds are present).
+                    #find_pda
 
-                let #field: #ty_decl = ({ #[inline(never)] || {
-                    // Checks that all the required accounts for this operation are present.
-                    #optional_checks
+                    let #field: #ty_decl = ({ #[inline(never)] || {
+                        let pa: #ty_decl = #from_account_info_unchecked;
+                        Ok(pa)
+                    }})()?;
+                }
+            } else {
+                quote! {
+                    // Define the bump and pda variable.
+                    #find_pda
 
-                    let owner_program = AsRef::<AccountInfo>::as_ref(&#field).owner;
-                    if !#if_needed || owner_program == &anchor_lang::solana_program::system_program::ID {
-                        // Define payer variable.
-                        #payer_optional_check
+                    let #field: #ty_decl = ({ #[inline(never)] || {
+                        // Checks that all the required accounts for this operation are present.
+                        #optional_checks
 
-                        // Create the account with the system program.
-                        #create_account
+                        let owner_program = AsRef::<AccountInfo>::as_ref(&#field).owner;
+                        if !#if_needed || owner_program == &anchor_lang::solana_program::system_program::ID {
+                            // Define payer variable.
+                            #payer_optional_check
 
-                        // Initialize extensions.
-                        if let Some(extensions) = #extensions {
-                            for e in extensions {
-                                match e {
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::GroupPointer => {
-                                        ::anchor_spl::token_interface::group_pointer_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::GroupPointerInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }), #group_pointer_authority, #group_pointer_group_address)?;
-                                    },
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::GroupMemberPointer => {
-                                        ::anchor_spl::token_interface::group_member_pointer_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::GroupMemberPointerInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }), #group_member_pointer_authority, #group_member_pointer_member_address)?;
-                                    },
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::MetadataPointer => {
-                                        ::anchor_spl::token_interface::metadata_pointer_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::MetadataPointerInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }), #metadata_pointer_authority, #metadata_pointer_metadata_address)?;
-                                    },
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::MintCloseAuthority => {
-                                        ::anchor_spl::token_interface::mint_close_authority_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::MintCloseAuthorityInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }), #close_authority)?;
-                                    },
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::TransferHook => {
-                                        ::anchor_spl::token_interface::transfer_hook_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::TransferHookInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }), #transfer_hook_authority, #transfer_hook_program_id)?;
-                                    },
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::NonTransferable => {
-                                        ::anchor_spl::token_interface::non_transferable_mint_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::NonTransferableMintInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }))?;
-                                    },
-                                    ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::PermanentDelegate => {
-                                        ::anchor_spl::token_interface::permanent_delegate_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::PermanentDelegateInitialize {
-                                            token_program_id: #token_program.to_account_info(),
-                                            mint: #field.to_account_info(),
-                                        }), #permanent_delegate.unwrap())?;
-                                    },
-                                    // All extensions specified by the user should be implemented.
-                                    // If this line runs, it means there is a bug in the codegen.
-                                    _ => unimplemented!("{e:?}"),
-                                }
+                            // Create the account with the system program.
+                            #create_account
+
+                            // Initialize extensions.
+                            if let Some(extensions) = #extensions {
+                                for e in extensions {
+                                    match e {
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::GroupPointer => {
+                                            ::anchor_spl::token_interface::group_pointer_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::GroupPointerInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }), #group_pointer_authority, #group_pointer_group_address)?;
+                                        },
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::GroupMemberPointer => {
+                                            ::anchor_spl::token_interface::group_member_pointer_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::GroupMemberPointerInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }), #group_member_pointer_authority, #group_member_pointer_member_address)?;
+                                        },
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::MetadataPointer => {
+                                            ::anchor_spl::token_interface::metadata_pointer_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::MetadataPointerInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }), #metadata_pointer_authority, #metadata_pointer_metadata_address)?;
+                                        },
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::MintCloseAuthority => {
+                                            ::anchor_spl::token_interface::mint_close_authority_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::MintCloseAuthorityInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }), #close_authority)?;
+                                        },
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::TransferHook => {
+                                            ::anchor_spl::token_interface::transfer_hook_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::TransferHookInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }), #transfer_hook_authority, #transfer_hook_program_id)?;
+                                        },
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::NonTransferable => {
+                                            ::anchor_spl::token_interface::non_transferable_mint_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::NonTransferableMintInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }))?;
+                                        },
+                                        ::anchor_spl::token_interface::spl_token_2022::extension::ExtensionType::PermanentDelegate => {
+                                            ::anchor_spl::token_interface::permanent_delegate_initialize(anchor_lang::context::CpiContext::new(#token_program.to_account_info(), ::anchor_spl::token_interface::PermanentDelegateInitialize {
+                                                token_program_id: #token_program.to_account_info(),
+                                                mint: #field.to_account_info(),
+                                            }), #permanent_delegate.unwrap())?;
+                                        },
+                                        // All extensions specified by the user should be implemented.
+                                        // If this line runs, it means there is a bug in the codegen.
+                                        _ => unimplemented!("{e:?}"),
+                                    }
+                                };
+                            }
+
+                            // Initialize the mint account.
+                            let cpi_program = #token_program.to_account_info();
+                            let accounts = ::anchor_spl::token_interface::InitializeMint2 {
+                                mint: #field.to_account_info(),
                             };
+                            let cpi_ctx = anchor_lang::context::CpiContext::new(cpi_program, accounts);
+                            ::anchor_spl::token_interface::initialize_mint2(cpi_ctx, #decimals, &#owner.key(), #freeze_authority)?;
                         }
 
-                        // Initialize the mint account.
-                        let cpi_program = #token_program.to_account_info();
-                        let accounts = ::anchor_spl::token_interface::InitializeMint2 {
-                            mint: #field.to_account_info(),
-                        };
-                        let cpi_ctx = anchor_lang::context::CpiContext::new(cpi_program, accounts);
-                        ::anchor_spl::token_interface::initialize_mint2(cpi_ctx, #decimals, &#owner.key(), #freeze_authority)?;
-                    }
-
-                    let pa: #ty_decl = #from_account_info_unchecked;
-                    if #if_needed {
-                        if pa.mint_authority != anchor_lang::solana_program::program_option::COption::Some(#owner.key()) {
-                            return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintMintAuthority).with_account_name(#name_str));
+                        let pa: #ty_decl = #from_account_info_unchecked;
+                        if #if_needed {
+                            if pa.mint_authority != anchor_lang::solana_program::program_option::COption::Some(#owner.key()) {
+                                return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintMintAuthority).with_account_name(#name_str));
+                            }
+                            if pa.freeze_authority
+                                .as_ref()
+                                .map(|fa| #freeze_authority.as_ref().map(|expected_fa| fa != *expected_fa).unwrap_or(true))
+                                .unwrap_or(#freeze_authority.is_some()) {
+                                return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintFreezeAuthority).with_account_name(#name_str));
+                            }
+                            if pa.decimals != #decimals {
+                                return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintDecimals).with_account_name(#name_str).with_values((pa.decimals, #decimals)));
+                            }
+                            if owner_program != &#token_program.key() {
+                                return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintTokenProgram).with_account_name(#name_str).with_pubkeys((*owner_program, #token_program.key())));
+                            }
                         }
-                        if pa.freeze_authority
-                            .as_ref()
-                            .map(|fa| #freeze_authority.as_ref().map(|expected_fa| fa != *expected_fa).unwrap_or(true))
-                            .unwrap_or(#freeze_authority.is_some()) {
-                            return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintFreezeAuthority).with_account_name(#name_str));
-                        }
-                        if pa.decimals != #decimals {
-                            return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintDecimals).with_account_name(#name_str).with_values((pa.decimals, #decimals)));
-                        }
-                        if owner_program != &#token_program.key() {
-                            return Err(anchor_lang::error::Error::from(anchor_lang::error::ErrorCode::ConstraintMintTokenProgram).with_account_name(#name_str).with_pubkeys((*owner_program, #token_program.key())));
-                        }
-                    }
-                    Ok(pa)
-                }})()?;
+                        Ok(pa)
+                    }})()?;
+                }
             }
         }
         InitKind::Program { owner } | InitKind::Interface { owner } => {

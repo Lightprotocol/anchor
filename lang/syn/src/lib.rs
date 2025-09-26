@@ -466,6 +466,7 @@ impl Field {
             Ty::Account(_) => quote! {
                 anchor_lang::accounts::account::Account
             },
+            Ty::CMint(_) => quote! { anchor_lang::accounts::cmint::CMint },
             Ty::LazyAccount(_) => quote! {
                 anchor_lang::accounts::lazy_account::LazyAccount
             },
@@ -495,6 +496,7 @@ impl Field {
             Ty::UncheckedAccount => quote! {
                 UncheckedAccount
             },
+            Ty::CMint(_) => quote! { CMint },
             Ty::Signer => quote! {
                 Signer
             },
@@ -571,6 +573,7 @@ pub struct CompositeField {
 pub enum Ty {
     AccountInfo,
     UncheckedAccount,
+    CMint(CMintTy),
     AccountLoader(AccountLoaderTy),
     Sysvar(SysvarTy),
     Account(AccountTy),
@@ -637,6 +640,16 @@ pub struct InterfaceTy {
     pub account_type_path: TypePath,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct CMintTy {
+    pub authority: Option<Expr>,
+    pub decimals: Option<u8>,
+    pub mint_signer_seeds: Option<Vec<Expr>>,
+    pub mint_signer_bump: Option<Expr>,
+    pub program_authority_seeds: Option<Vec<Expr>>,
+    pub program_authority_bump: Option<Expr>,
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub name: String,
@@ -691,6 +704,8 @@ pub struct ConstraintGroup {
     pub token_account: Option<ConstraintTokenAccountGroup>,
     pub mint: Option<ConstraintTokenMintGroup>,
     pub realloc: Option<ConstraintReallocGroup>,
+    // CMint constraints
+    pub cmint: Option<ConstraintCMintGroup>,
 }
 
 impl ConstraintGroup {
@@ -763,6 +778,8 @@ pub enum ConstraintToken {
     MintFreezeAuthority(Context<ConstraintMintFreezeAuthority>),
     MintDecimals(Context<ConstraintMintDecimals>),
     MintTokenProgram(Context<ConstraintTokenProgram>),
+    // New: mint::compressed = true/false
+    MintCompressed(Context<ConstraintMintCompressed>),
     Bump(Context<ConstraintTokenBump>),
     ProgramSeed(Context<ConstraintProgramSeed>),
     Realloc(Context<ConstraintRealloc>),
@@ -783,6 +800,13 @@ pub enum ConstraintToken {
     ExtensionTokenHookAuthority(Context<ConstraintExtensionAuthority>),
     ExtensionTokenHookProgramId(Context<ConstraintExtensionTokenHookProgramId>),
     ExtensionPermanentDelegate(Context<ConstraintExtensionPermanentDelegate>),
+    // CMint constraints
+    CMintAuthority(Context<ConstraintCMintAuthority>),
+    CMintDecimals(Context<ConstraintCMintDecimals>),
+    CMintSignerSeeds(Context<ConstraintCMintSignerSeeds>),
+    CMintSignerBump(Context<ConstraintCMintSignerBump>),
+    CMintProgramAuthoritySeeds(Context<ConstraintCMintProgramAuthoritySeeds>),
+    CMintProgramAuthorityBump(Context<ConstraintCMintProgramAuthorityBump>),
 }
 
 impl Parse for ConstraintToken {
@@ -794,6 +818,8 @@ impl Parse for ConstraintToken {
 #[derive(Debug, Clone)]
 pub struct ConstraintInit {
     pub if_needed: bool,
+    pub compressible: bool,
+    pub compress_on_init: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -871,6 +897,8 @@ pub struct ConstraintInitGroup {
     pub payer: Expr,
     pub space: Option<Expr>,
     pub kind: InitKind,
+    pub compressible: bool,
+    pub compress_on_init: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -956,6 +984,8 @@ pub enum InitKind {
         freeze_authority: Option<Expr>,
         decimals: Expr,
         token_program: Option<Expr>,
+        // New flag to trigger cMint flow
+        compressed: Option<bool>,
         // extensions
         group_pointer_authority: Option<Expr>,
         group_pointer_group_address: Option<Expr>,
@@ -1046,6 +1076,51 @@ pub struct ConstraintMintDecimals {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConstraintMintCompressed {
+    pub compressed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintAuthority {
+    pub authority: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintDecimals {
+    pub decimals: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintSignerSeeds {
+    pub seeds: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintSignerBump {
+    pub bump: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintProgramAuthoritySeeds {
+    pub seeds: Vec<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintProgramAuthorityBump {
+    pub bump: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintGroup {
+    pub authority: Option<Expr>,
+    pub decimals: Option<u8>,
+    pub mint_signer_seeds: Option<Vec<Expr>>,
+    pub mint_signer_bump: Option<Expr>,
+    pub program_authority_seeds: Option<Vec<Expr>>,
+    pub program_authority_bump: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConstraintTokenBump {
     pub bump: Option<Expr>,
 }
@@ -1075,6 +1150,8 @@ pub struct ConstraintTokenMintGroup {
     pub mint_authority: Option<Expr>,
     pub freeze_authority: Option<Expr>,
     pub token_program: Option<Expr>,
+    // New: compressed mint flag (cMint)
+    pub compressed: Option<bool>,
     pub group_pointer_authority: Option<Expr>,
     pub group_pointer_group_address: Option<Expr>,
     pub group_member_pointer_authority: Option<Expr>,

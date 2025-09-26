@@ -37,6 +37,19 @@ idl-build = [
 init-if-needed = ["anchor-derive-accounts/init-if-needed"]
 interface-instructions = ["anchor-attribute-program/interface-instructions"]
 lazy-account = ["anchor-attribute-account/lazy-account", "anchor-derive-serde/lazy-account"]
+compressed-mint = []
+compressed-mint-light = [
+    "compressed-mint",
+    "light-sdk",
+    "light-sdk-types",
+    "light-hasher",
+    "light-macros",
+    "light-sdk-macros",
+    "light-compressed-account",
+    "light-compressed-token-sdk",
+    "light-ctoken-types",
+    "light-compressible"
+]
 
 [dependencies]
 anchor-attribute-access-control = { path = "./attribute/access-control", version = "0.31.1" }
@@ -58,3 +71,14 @@ borsh = "0.10.3"
 bytemuck = "1"
 solana-program = "2"
 thiserror = "1"
+
+# Light Protocol dependencies (optional)
+light-sdk = { path = "../../light-protocol/sdk-libs/sdk", features = ["anchor", "anchor-discriminator-compat", "v2"], optional = true }
+light-sdk-types = { path = "../../light-protocol/sdk-libs/sdk-types", features = ["v2"], optional = true }
+light-hasher = { path = "../../light-protocol/program-libs/hasher", features = ["solana"], optional = true }
+light-macros = { path = "../../light-protocol/program-libs/macros", features = ["solana"], optional = true }
+light-sdk-macros = { path = "../../light-protocol/sdk-libs/macros", features = ["anchor-discriminator-compat"], optional = true }
+light-compressed-account = { path = "../../light-protocol/program-libs/compressed-account", features = ["anchor"], optional = true }
+light-compressed-token-sdk = { path = "../../light-protocol/sdk-libs/compressed-token-sdk", features = ["anchor"], optional = true }
+light-ctoken-types = { path = "../../light-protocol/program-libs/ctoken-types", features = ["anchor"], optional = true }
+light-compressible = { path = "../../light-protocol/program-libs/compressible", optional = true }

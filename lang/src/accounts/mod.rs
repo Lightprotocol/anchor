@@ -13,5 +13,9 @@ pub mod system_account;
 pub mod sysvar;
 pub mod unchecked_account;
 
+// Compressed mint account type (feature-gated until stabilized)
+#[cfg(feature = "compressed-mint")]
+pub mod cmint;
+
 #[cfg(feature = "lazy-account")]
 pub mod lazy_account;

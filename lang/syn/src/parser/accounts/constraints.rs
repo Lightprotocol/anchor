@@ -28,12 +28,26 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
     let c = match kw.as_str() {
         "init" => ConstraintToken::Init(Context::new(
             ident.span(),
-            ConstraintInit { if_needed: false },
+            ConstraintInit { if_needed: false, compressible: false, compress_on_init: false },
         )),
         "init_if_needed" => ConstraintToken::Init(Context::new(
             ident.span(),
-            ConstraintInit { if_needed: true },
+            ConstraintInit { if_needed: true, compressible: false, compress_on_init: false },
         )),
+        "compressible" => {
+            // For prepare-only compression (no auto-close)
+            ConstraintToken::Init(Context::new(
+                ident.span(),
+                ConstraintInit { if_needed: false, compressible: true, compress_on_init: false },
+            ))
+        }
+        "compress_on_init" => {
+            // For immediate compression with auto-close
+            ConstraintToken::Init(Context::new(
+                ident.span(),
+                ConstraintInit { if_needed: false, compressible: false, compress_on_init: true },
+            ))
+        }
         "zero" => ConstraintToken::Zeroed(Context::new(ident.span(), ConstraintZeroed {})),
         "mut" => ConstraintToken::Mut(Context::new(
             ident.span(),
@@ -86,6 +100,15 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                         token_program: stream.parse()?,
                     },
                 )),
+                "compressed" => {
+                    let lit_bool: syn::LitBool = stream.parse()?;
+                    ConstraintToken::MintCompressed(Context::new(
+                        span,
+                        ConstraintMintCompressed {
+                            compressed: lit_bool.value,
+                        },
+                    ))
+                }
                 _ => return Err(ParseError::new(ident.span(), "Invalid attribute")),
             }
         }
@@ -291,6 +314,63 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                     },
                 )),
                 _ => return Err(ParseError::new(ident.span(), "Invalid attribute")),
+            }
+        }
+        "cmint" => {
+            stream.parse::<Token![:]>()?;
+            stream.parse::<Token![:]>()?;
+            let kw = stream.call(Ident::parse_any)?.to_string();
+            stream.parse::<Token![=]>()?;
+
+            let span = ident
+                .span()
+                .join(stream.span())
+                .unwrap_or_else(|| ident.span());
+
+            match kw.as_str() {
+                "authority" => ConstraintToken::CMintAuthority(Context::new(
+                    span,
+                    ConstraintCMintAuthority {
+                        authority: stream.parse()?,
+                    },
+                )),
+                "decimals" => ConstraintToken::CMintDecimals(Context::new(
+                    span,
+                    ConstraintCMintDecimals {
+                        decimals: stream.parse::<syn::LitInt>()?.base10_parse()?,
+                    },
+                )),
+                "mint_signer_seeds" => {
+                    let seeds_stream;
+                    let bracket = bracketed!(seeds_stream in stream);
+                    let seeds: Punctuated<Expr, Token![,]> = seeds_stream.parse_terminated(Expr::parse)?;
+                    ConstraintToken::CMintSignerSeeds(Context::new(
+                        span.join(bracket.span).unwrap_or(span),
+                        ConstraintCMintSignerSeeds { seeds: seeds.into_iter().collect() },
+                    ))
+                }
+                "mint_signer_bump" => ConstraintToken::CMintSignerBump(Context::new(
+                    span,
+                    ConstraintCMintSignerBump {
+                        bump: stream.parse()?,
+                    },
+                )),
+                "program_authority_seeds" => {
+                    let seeds_stream;
+                    let bracket = bracketed!(seeds_stream in stream);
+                    let seeds: Punctuated<Expr, Token![,]> = seeds_stream.parse_terminated(Expr::parse)?;
+                    ConstraintToken::CMintProgramAuthoritySeeds(Context::new(
+                        span.join(bracket.span).unwrap_or(span),
+                        ConstraintCMintProgramAuthoritySeeds { seeds: seeds.into_iter().collect() },
+                    ))
+                }
+                "program_authority_bump" => ConstraintToken::CMintProgramAuthorityBump(Context::new(
+                    span,
+                    ConstraintCMintProgramAuthorityBump {
+                        bump: stream.parse()?,
+                    },
+                )),
+                _ => return Err(ParseError::new(ident.span(), "Invalid cmint attribute")),
             }
         }
         "associated_token" => {
@@ -525,6 +605,7 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub mint_freeze_authority: Option<Context<ConstraintMintFreezeAuthority>>,
     pub mint_decimals: Option<Context<ConstraintMintDecimals>>,
     pub mint_token_program: Option<Context<ConstraintTokenProgram>>,
+    pub mint_compressed: Option<Context<ConstraintMintCompressed>>,
     pub extension_group_pointer_authority: Option<Context<ConstraintExtensionAuthority>>,
     pub extension_group_pointer_group_address:
         Option<Context<ConstraintExtensionGroupPointerGroupAddress>>,
@@ -543,6 +624,13 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub realloc: Option<Context<ConstraintRealloc>>,
     pub realloc_payer: Option<Context<ConstraintReallocPayer>>,
     pub realloc_zero: Option<Context<ConstraintReallocZero>>,
+    // CMint constraints
+    pub cmint_authority: Option<Context<ConstraintCMintAuthority>>,
+    pub cmint_decimals: Option<Context<ConstraintCMintDecimals>>,
+    pub cmint_signer_seeds: Option<Context<ConstraintCMintSignerSeeds>>,
+    pub cmint_signer_bump: Option<Context<ConstraintCMintSignerBump>>,
+    pub cmint_program_authority_seeds: Option<Context<ConstraintCMintProgramAuthoritySeeds>>,
+    pub cmint_program_authority_bump: Option<Context<ConstraintCMintProgramAuthorityBump>>,
 }
 
 impl<'ty> ConstraintGroupBuilder<'ty> {
@@ -573,6 +661,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             mint_freeze_authority: None,
             mint_decimals: None,
             mint_token_program: None,
+            mint_compressed: None,
             extension_group_pointer_authority: None,
             extension_group_pointer_group_address: None,
             extension_group_member_pointer_authority: None,
@@ -588,6 +677,12 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc: None,
             realloc_payer: None,
             realloc_zero: None,
+            cmint_authority: None,
+            cmint_decimals: None,
+            cmint_signer_seeds: None,
+            cmint_signer_bump: None,
+            cmint_program_authority_seeds: None,
+            cmint_program_authority_bump: None,
         }
     }
 
@@ -618,8 +713,20 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             };
             // Rent exempt if not explicitly skipped.
             if self.rent_exempt.is_none() {
+                // For compressed mints, we do not create a system account, so skip rent check by default.
+                let is_compressed_mint = self.mint_decimals.is_some()
+                    && self
+                        .mint_compressed
+                        .as_ref()
+                        .map(|c| c.inner.compressed)
+                        .unwrap_or(false);
+                let rent_policy = if is_compressed_mint {
+                    ConstraintRentExempt::Skip
+                } else {
+                    ConstraintRentExempt::Enforce
+                };
                 self.rent_exempt
-                    .replace(Context::new(i.span(), ConstraintRentExempt::Enforce));
+                    .replace(Context::new(i.span(), rent_policy));
             }
             if self.payer.is_none() {
                 return Err(ParseError::new(
@@ -785,6 +892,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             mint_freeze_authority,
             mint_decimals,
             mint_token_program,
+            mint_compressed,
             extension_group_pointer_authority,
             extension_group_pointer_group_address,
             extension_group_member_pointer_authority,
@@ -800,6 +908,12 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc,
             realloc_payer,
             realloc_zero,
+            cmint_authority,
+            cmint_decimals,
+            cmint_signer_seeds,
+            cmint_signer_bump,
+            cmint_program_authority_seeds,
+            cmint_program_authority_bump,
         } = self;
 
         // Converts Option<Context<T>> -> Option<T>.
@@ -884,6 +998,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             &mint_authority,
             &mint_freeze_authority,
             &mint_token_program,
+            &mint_compressed,
             &extension_group_pointer_authority,
             &extension_group_pointer_group_address,
             &extension_group_member_pointer_authority,
@@ -896,6 +1011,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             &extension_permanent_delegate,
         ) {
             (
+                None,
                 None,
                 None,
                 None,
@@ -924,6 +1040,9 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                 token_program: mint_token_program
                     .as_ref()
                     .map(|a| a.clone().into_inner().token_program),
+                compressed: mint_compressed
+                    .as_ref()
+                    .map(|a| a.clone().into_inner().compressed),
                 // extensions
                 group_pointer_authority: extension_group_pointer_authority
                     .as_ref()
@@ -961,6 +1080,8 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
         Ok(ConstraintGroup {
             init: init.as_ref().map(|i| Ok(ConstraintInitGroup {
                 if_needed: i.if_needed,
+                compressible: i.compressible,
+                compress_on_init: i.compress_on_init,
                 seeds: seeds.clone(),
                 payer: into_inner!(payer.clone()).unwrap().target,
                 space: space.clone().map(|s| s.space.clone()),
@@ -994,6 +1115,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                         },
                         freeze_authority: mint_freeze_authority.map(|fa| fa.into_inner().mint_freeze_auth),
                         token_program: mint_token_program.map(|tp| tp.into_inner().token_program),
+                        compressed: mint_compressed.map(|mc| mc.into_inner().compressed),
                         // extensions
                         group_pointer_authority: extension_group_pointer_authority.map(|gpa| gpa.into_inner().authority),
                         group_pointer_group_address: extension_group_pointer_group_address.map(|gpga| gpga.into_inner().group_address),
@@ -1031,6 +1153,20 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             seeds,
             token_account: if !is_init {token_account} else {None},
             mint: if !is_init {mint} else {None},
+            cmint: if cmint_authority.is_some() || cmint_decimals.is_some() || 
+                       cmint_signer_seeds.is_some() || cmint_signer_bump.is_some() ||
+                       cmint_program_authority_seeds.is_some() || cmint_program_authority_bump.is_some() {
+                Some(ConstraintCMintGroup {
+                    authority: cmint_authority.map(|c| c.into_inner().authority),
+                    decimals: cmint_decimals.map(|c| c.into_inner().decimals),
+                    mint_signer_seeds: cmint_signer_seeds.map(|c| c.into_inner().seeds),
+                    mint_signer_bump: cmint_signer_bump.map(|c| c.into_inner().bump),
+                    program_authority_seeds: cmint_program_authority_seeds.map(|c| c.into_inner().seeds),
+                    program_authority_bump: cmint_program_authority_bump.map(|c| c.into_inner().bump),
+                })
+            } else {
+                None
+            },
         })
     }
 
@@ -1062,6 +1198,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ConstraintToken::MintFreezeAuthority(c) => self.add_mint_freeze_authority(c),
             ConstraintToken::MintDecimals(c) => self.add_mint_decimals(c),
             ConstraintToken::MintTokenProgram(c) => self.add_mint_token_program(c),
+            ConstraintToken::MintCompressed(c) => self.add_mint_compressed(c),
             ConstraintToken::Bump(c) => self.add_bump(c),
             ConstraintToken::ProgramSeed(c) => self.add_program_seed(c),
             ConstraintToken::Realloc(c) => self.add_realloc(c),
@@ -1093,11 +1230,32 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ConstraintToken::ExtensionPermanentDelegate(c) => {
                 self.add_extension_permanent_delegate(c)
             }
+            ConstraintToken::CMintAuthority(c) => self.add_cmint_authority(c),
+            ConstraintToken::CMintDecimals(c) => self.add_cmint_decimals(c),
+            ConstraintToken::CMintSignerSeeds(c) => self.add_cmint_signer_seeds(c),
+            ConstraintToken::CMintSignerBump(c) => self.add_cmint_signer_bump(c),
+            ConstraintToken::CMintProgramAuthoritySeeds(c) => self.add_cmint_program_authority_seeds(c),
+            ConstraintToken::CMintProgramAuthorityBump(c) => self.add_cmint_program_authority_bump(c),
         }
     }
 
     fn add_init(&mut self, c: Context<ConstraintInit>) -> ParseResult<()> {
-        if self.init.is_some() {
+        if let Some(existing) = &mut self.init {
+            // Merge compressible flag if adding compressible to existing init
+            if c.inner.compressible && !existing.inner.compressible && !existing.inner.compress_on_init {
+                existing.inner.compressible = true;
+                return Ok(());
+            }
+            // Merge compress_on_init flag if adding to existing init
+            if c.inner.compress_on_init && !existing.inner.compressible && !existing.inner.compress_on_init {
+                existing.inner.compress_on_init = true;
+                return Ok(());
+            }
+            // Merge init with existing compressible/compress_on_init
+            if !c.inner.compressible && !c.inner.compress_on_init && (existing.inner.compressible || existing.inner.compress_on_init) {
+                existing.inner.if_needed = c.inner.if_needed;
+                return Ok(());
+            }
             return Err(ParseError::new(c.span(), "init already provided"));
         }
         if self.zeroed.is_some() {
@@ -1435,6 +1593,65 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ));
         }
         self.mint_token_program.replace(c);
+        Ok(())
+    }
+
+    fn add_mint_compressed(&mut self, c: Context<ConstraintMintCompressed>) -> ParseResult<()> {
+        if self.mint_compressed.is_some() {
+            return Err(ParseError::new(
+                c.span(),
+                "mint compressed already provided",
+            ));
+        }
+        self.mint_compressed.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_authority(&mut self, c: Context<ConstraintCMintAuthority>) -> ParseResult<()> {
+        if self.cmint_authority.is_some() {
+            return Err(ParseError::new(c.span(), "cmint authority already provided"));
+        }
+        self.cmint_authority.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_decimals(&mut self, c: Context<ConstraintCMintDecimals>) -> ParseResult<()> {
+        if self.cmint_decimals.is_some() {
+            return Err(ParseError::new(c.span(), "cmint decimals already provided"));
+        }
+        self.cmint_decimals.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_signer_seeds(&mut self, c: Context<ConstraintCMintSignerSeeds>) -> ParseResult<()> {
+        if self.cmint_signer_seeds.is_some() {
+            return Err(ParseError::new(c.span(), "cmint mint_signer_seeds already provided"));
+        }
+        self.cmint_signer_seeds.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_signer_bump(&mut self, c: Context<ConstraintCMintSignerBump>) -> ParseResult<()> {
+        if self.cmint_signer_bump.is_some() {
+            return Err(ParseError::new(c.span(), "cmint mint_signer_bump already provided"));
+        }
+        self.cmint_signer_bump.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_program_authority_seeds(&mut self, c: Context<ConstraintCMintProgramAuthoritySeeds>) -> ParseResult<()> {
+        if self.cmint_program_authority_seeds.is_some() {
+            return Err(ParseError::new(c.span(), "cmint program_authority_seeds already provided"));
+        }
+        self.cmint_program_authority_seeds.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_program_authority_bump(&mut self, c: Context<ConstraintCMintProgramAuthorityBump>) -> ParseResult<()> {
+        if self.cmint_program_authority_bump.is_some() {
+            return Err(ParseError::new(c.span(), "cmint program_authority_bump already provided"));
+        }
+        self.cmint_program_authority_bump.replace(c);
         Ok(())
     }
 

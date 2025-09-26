@@ -68,11 +68,66 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     } else {
                         let name = f.ident.to_string();
                         let typed_name = f.typed_ident();
-                        quote! {
-                            #[cfg(feature = "anchor-debug")]
-                            ::solana_program::log::sol_log(stringify!(#typed_name));
-                            let #typed_name = anchor_lang::Accounts::try_accounts(__program_id, __accounts, __ix_data, __bumps, __reallocs)
-                                .map_err(|e| e.with_account_name(#name))?;
+                        
+                        // Special handling for CMint fields to populate constraints
+                        if matches!(&f.ty, crate::Ty::CMint(_)) {
+                            let ident = &f.ident;
+                            let cmint_setup = if let Some(cmint_group) = &f.constraints.cmint {
+                                let authority = cmint_group.authority.as_ref().map(|a| quote! { 
+                                    #ident.authority = Some(#a);
+                                });
+                                let decimals = cmint_group.decimals.map(|d| quote! { 
+                                    #ident.decimals = Some(#d);
+                                });
+                                let mint_signer_seeds = cmint_group.mint_signer_seeds.as_ref().map(|seeds| {
+                                    let seed_bytes: Vec<_> = seeds.iter().map(|s| quote! {
+                                        anchor_lang::ToAccountInfo::to_account_info(&#s).key.to_bytes().to_vec()
+                                    }).collect();
+                                    quote! {
+                                        #ident.mint_signer_seeds = Some(vec![#(#seed_bytes),*]);
+                                    }
+                                });
+                                let mint_signer_bump = cmint_group.mint_signer_bump.as_ref().map(|b| quote! {
+                                    #ident.mint_signer_bump = Some(#b);
+                                });
+                                let program_authority_seeds = cmint_group.program_authority_seeds.as_ref().map(|seeds| {
+                                    let seed_bytes: Vec<_> = seeds.iter().map(|s| quote! {
+                                        anchor_lang::ToAccountInfo::to_account_info(&#s).key.to_bytes().to_vec()
+                                    }).collect();
+                                    quote! {
+                                        #ident.program_authority_seeds = Some(vec![#(#seed_bytes),*]);
+                                    }
+                                });
+                                let program_authority_bump = cmint_group.program_authority_bump.as_ref().map(|b| quote! {
+                                    #ident.program_authority_bump = Some(#b);
+                                });
+                                
+                                quote! {
+                                    #authority
+                                    #decimals
+                                    #mint_signer_seeds
+                                    #mint_signer_bump
+                                    #program_authority_seeds
+                                    #program_authority_bump
+                                }
+                            } else {
+                                quote! {}
+                            };
+                            
+                            quote! {
+                                #[cfg(feature = "anchor-debug")]
+                                ::solana_program::log::sol_log(stringify!(#typed_name));
+                                let mut #typed_name = anchor_lang::Accounts::try_accounts(__program_id, __accounts, __ix_data, __bumps, __reallocs)
+                                    .map_err(|e| e.with_account_name(#name))?;
+                                #cmint_setup
+                            }
+                        } else {
+                            quote! {
+                                #[cfg(feature = "anchor-debug")]
+                                ::solana_program::log::sol_log(stringify!(#typed_name));
+                                let #typed_name = anchor_lang::Accounts::try_accounts(__program_id, __accounts, __ix_data, __bumps, __reallocs)
+                                    .map_err(|e| e.with_account_name(#name))?;
+                            }
                         }
                     }
                 }
