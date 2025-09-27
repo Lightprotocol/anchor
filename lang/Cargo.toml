@@ -45,7 +45,7 @@ compressed-mint-light = [
     "light-hasher",
     "light-macros",
     "light-sdk-macros",
-    "light-compressed-account",
+    # "light-compressed-account",
     "light-compressed-token-sdk",
     "light-ctoken-types",
     "light-compressible"
@@ -78,7 +78,7 @@ light-sdk-types = { path = "../../light-protocol/sdk-libs/sdk-types", features =
 light-hasher = { path = "../../light-protocol/program-libs/hasher", features = ["solana"], optional = true }
 light-macros = { path = "../../light-protocol/program-libs/macros", features = ["solana"], optional = true }
 light-sdk-macros = { path = "../../light-protocol/sdk-libs/macros", features = ["anchor-discriminator-compat"], optional = true }
-light-compressed-account = { path = "../../light-protocol/program-libs/compressed-account", features = ["anchor"], optional = true }
+# light-compressed-account = { path = "../../light-protocol/program-libs/compressed-account", features = ["anchor"], optional = true }
 light-compressed-token-sdk = { path = "../../light-protocol/sdk-libs/compressed-token-sdk", features = ["anchor"], optional = true }
 light-ctoken-types = { path = "../../light-protocol/program-libs/ctoken-types", features = ["anchor"], optional = true }
 light-compressible = { path = "../../light-protocol/program-libs/compressible", optional = true }

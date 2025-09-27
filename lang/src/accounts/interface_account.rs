@@ -290,6 +290,12 @@ impl<'info, T: AccountSerialize + AccountDeserialize + Clone> ToAccountInfos<'in
     }
 }
 
+impl<'info, T: AccountSerialize + AccountDeserialize + Clone> crate::AccountsFinalize<'info>
+    for InterfaceAccount<'info, T>
+{
+    // Uses default implementation
+}
+
 impl<'info, T: AccountSerialize + AccountDeserialize + Clone> AsRef<AccountInfo<'info>>
     for InterfaceAccount<'info, T>
 {

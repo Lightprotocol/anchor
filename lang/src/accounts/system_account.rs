@@ -66,6 +66,10 @@ impl<'info> ToAccountInfos<'info> for SystemAccount<'info> {
     }
 }
 
+impl<'info> crate::AccountsFinalize<'info> for SystemAccount<'info> {
+    // Uses default implementation
+}
+
 impl<'info> AsRef<AccountInfo<'info>> for SystemAccount<'info> {
     fn as_ref(&self) -> &AccountInfo<'info> {
         self.info

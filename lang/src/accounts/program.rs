@@ -174,6 +174,10 @@ impl<'info, T> ToAccountInfos<'info> for Program<'info, T> {
     }
 }
 
+impl<'info, T> crate::AccountsFinalize<'info> for Program<'info, T> {
+    // Uses default implementation
+}
+
 impl<'info, T> AsRef<AccountInfo<'info>> for Program<'info, T> {
     fn as_ref(&self) -> &AccountInfo<'info> {
         self.info

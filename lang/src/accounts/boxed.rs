@@ -44,6 +44,17 @@ impl<'info, T: ToAccountInfos<'info>> ToAccountInfos<'info> for Box<T> {
     }
 }
 
+impl<'info, T: crate::AccountsFinalize<'info>> crate::AccountsFinalize<'info> for Box<T> {
+    fn finalize(
+        &self,
+        program_id: &Pubkey,
+        remaining_accounts: &[AccountInfo<'info>],
+        ix_data: &[u8],
+    ) -> Result<()> {
+        T::finalize(self, program_id, remaining_accounts, ix_data)
+    }
+}
+
 impl<T: ToAccountMetas> ToAccountMetas for Box<T> {
     fn to_account_metas(&self, is_signer: Option<bool>) -> Vec<AccountMeta> {
         T::to_account_metas(self, is_signer)

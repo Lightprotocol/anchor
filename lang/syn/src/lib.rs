@@ -305,6 +305,9 @@ impl Field {
             Ty::UncheckedAccount => quote! {
                 UncheckedAccount
             },
+            Ty::CMint(_) => quote! {
+                CMint
+            },
             Ty::Signer => quote! {
                 Signer
             },
@@ -704,8 +707,9 @@ pub struct ConstraintGroup {
     pub token_account: Option<ConstraintTokenAccountGroup>,
     pub mint: Option<ConstraintTokenMintGroup>,
     pub realloc: Option<ConstraintReallocGroup>,
-    // CMint constraints
+    // Compressed constraints
     pub cmint: Option<ConstraintCMintGroup>,
+    pub cpda: Option<ConstraintCPDAGroup>,
 }
 
 impl ConstraintGroup {
@@ -802,11 +806,21 @@ pub enum ConstraintToken {
     ExtensionPermanentDelegate(Context<ConstraintExtensionPermanentDelegate>),
     // CMint constraints
     CMintAuthority(Context<ConstraintCMintAuthority>),
+    CMintPayer(Context<ConstraintCMintPayer>),
     CMintDecimals(Context<ConstraintCMintDecimals>),
+    CMintSigner(Context<ConstraintCMintSigner>),
     CMintSignerSeeds(Context<ConstraintCMintSignerSeeds>),
     CMintSignerBump(Context<ConstraintCMintSignerBump>),
     CMintProgramAuthoritySeeds(Context<ConstraintCMintProgramAuthoritySeeds>),
     CMintProgramAuthorityBump(Context<ConstraintCMintProgramAuthorityBump>),
+    CMintAddressTreeInfo(Context<ConstraintCMintAddressTreeInfo>),
+    CMintProof(Context<ConstraintCMintProof>),
+    CMintOutputStateTreeIndex(Context<ConstraintCMintOutputStateTreeIndex>),
+    // CPDA constraints
+    CPDAAddressTreeInfo(Context<ConstraintCPDAAddressTreeInfo>),
+    CPDAProof(Context<ConstraintCPDAProof>),
+    CPDAOutputStateTreeIndex(Context<ConstraintCPDAOutputStateTreeIndex>),
+    CPDACompressOnInit(Context<ConstraintCPDACompressOnInit>),
 }
 
 impl Parse for ConstraintToken {
@@ -818,8 +832,6 @@ impl Parse for ConstraintToken {
 #[derive(Debug, Clone)]
 pub struct ConstraintInit {
     pub if_needed: bool,
-    pub compressible: bool,
-    pub compress_on_init: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -897,8 +909,6 @@ pub struct ConstraintInitGroup {
     pub payer: Expr,
     pub space: Option<Expr>,
     pub kind: InitKind,
-    pub compressible: bool,
-    pub compress_on_init: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1086,8 +1096,18 @@ pub struct ConstraintCMintAuthority {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConstraintCMintPayer {
+    pub payer: Expr,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConstraintCMintDecimals {
     pub decimals: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintSigner {
+    pub signer: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -1111,14 +1131,60 @@ pub struct ConstraintCMintProgramAuthorityBump {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConstraintCMintAddressTreeInfo {
+    pub address_tree_info: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintProof {
+    pub proof: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintOutputStateTreeIndex {
+    pub output_state_tree_index: Expr,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConstraintCMintGroup {
     pub authority: Option<Expr>,
     pub decimals: Option<u8>,
+    pub payer: Option<Expr>,
+    pub mint_signer: Option<Expr>,
     pub mint_signer_seeds: Option<Vec<Expr>>,
     pub mint_signer_bump: Option<Expr>,
     pub program_authority_seeds: Option<Vec<Expr>>,
     pub program_authority_bump: Option<Expr>,
+    pub address_tree_info: Option<Expr>,
+    pub proof: Option<Expr>,
+    pub output_state_tree_index: Option<Expr>,
 }
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCPDAGroup {
+    pub compress_on_init: bool, // If true, compress immediately. If false, just prepare.
+    pub address_tree_info: Option<Expr>,
+    pub proof: Option<Expr>,
+    pub output_state_tree_index: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCPDAAddressTreeInfo {
+    pub address_tree_info: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCPDAProof {
+    pub proof: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCPDAOutputStateTreeIndex {
+    pub output_state_tree_index: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCPDACompressOnInit {}
 
 #[derive(Debug, Clone)]
 pub struct ConstraintTokenBump {

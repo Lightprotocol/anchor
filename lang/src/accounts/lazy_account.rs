@@ -319,6 +319,13 @@ where
     }
 }
 
+impl<'info, T> crate::AccountsFinalize<'info> for LazyAccount<'info, T>
+where
+    T: AccountSerialize + Discriminator + Owner + Clone,
+{
+    // Uses default implementation
+}
+
 impl<'info, T> AsRef<AccountInfo<'info>> for LazyAccount<'info, T>
 where
     T: AccountSerialize + Discriminator + Owner + Clone,

@@ -54,6 +54,10 @@ impl<'info> ToAccountInfos<'info> for UncheckedAccount<'info> {
     }
 }
 
+impl<'info> crate::AccountsFinalize<'info> for UncheckedAccount<'info> {
+    // Uses default implementation
+}
+
 impl<'info> AccountsExit<'info> for UncheckedAccount<'info> {}
 
 impl<'info> AsRef<AccountInfo<'info>> for UncheckedAccount<'info> {

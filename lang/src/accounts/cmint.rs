@@ -21,6 +21,7 @@ pub struct CMint<'info> {
     // Constraints from account macro
     pub authority: Option<Pubkey>,
     pub decimals: Option<u8>,
+    pub mint_signer: Option<AccountInfo<'info>>,
     pub mint_signer_seeds: Option<Vec<Vec<u8>>>,
     pub mint_signer_bump: Option<u8>,
     pub program_authority_seeds: Option<Vec<Vec<u8>>>,
@@ -28,7 +29,7 @@ pub struct CMint<'info> {
 }
 
 impl<'info> CMint<'info> {
-    pub fn mint_to(&self, recipient: &Pubkey, amount: u64) -> Result<()> {
+    pub fn mint_to(&self, recipient: &Pubkey, amount: u64) -> crate::Result<()> {
         self.actions.borrow_mut().push(MintAction {
             recipient: *recipient,
             amount,
@@ -69,12 +70,12 @@ impl<'info> Key for CMint<'info> {
     }
 }
 
-impl<'info> Accounts<'info, ()> for CMint<'info> {
+impl<'info, T> Accounts<'info, T> for CMint<'info> {
     fn try_accounts(
         _program_id: &Pubkey,
         accounts: &mut &'info [AccountInfo<'info>],
         _ix_data: &[u8],
-        _bumps: &mut (),
+        _bumps: &mut T,
         _reallocs: &mut BTreeSet<Pubkey>,
     ) -> Result<Self> {
         if accounts.is_empty() {
@@ -87,6 +88,7 @@ impl<'info> Accounts<'info, ()> for CMint<'info> {
             actions: RefCell::new(Vec::new()),
             authority: None,
             decimals: None,
+            mint_signer: None,
             mint_signer_seeds: None,
             mint_signer_bump: None,
             program_authority_seeds: None,

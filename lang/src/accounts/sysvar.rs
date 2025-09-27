@@ -94,6 +94,10 @@ impl<'info, T: solana_program::sysvar::Sysvar> ToAccountInfos<'info> for Sysvar<
     }
 }
 
+impl<'info, T: solana_program::sysvar::Sysvar> crate::AccountsFinalize<'info> for Sysvar<'info, T> {
+    // Uses default implementation
+}
+
 impl<'info, T: solana_program::sysvar::Sysvar> AsRef<AccountInfo<'info>> for Sysvar<'info, T> {
     fn as_ref(&self) -> &AccountInfo<'info> {
         self.info

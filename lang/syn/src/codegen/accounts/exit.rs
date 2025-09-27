@@ -63,21 +63,17 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         })
         .collect();
 
-    // Scan for compressible Account fields and CMints to assign indices
-    let mut compressible_fields = Vec::new();
-    let mut compress_on_init_fields = Vec::new();
+    // Scan for CPDA Account fields and CMints to assign indices
+    let mut cpda_fields = Vec::new();
     let mut cmint_field = None;
     
     for af in &accs.fields {
         if let AccountField::Field(f) = af {
-            // Check if this is a compressible Account
-            if matches!(&f.ty, Ty::Account(_)) {
-                if let Some(init) = &f.constraints.init {
-                    if init.compressible {
-                        compressible_fields.push(&f.ident);
-                    } else if init.compress_on_init {
-                        compress_on_init_fields.push(&f.ident);
-                    }
+            // Check if this is a CPDA Account
+            // Skip fields with compress_on_init since they're compressed immediately
+            if let Some(cpda) = &f.constraints.cpda {
+                if !cpda.compress_on_init {
+                    cpda_fields.push(&f.ident);
                 }
             } else if matches!(&f.ty, Ty::CMint(_)) {
                 if cmint_field.is_none() {
@@ -87,26 +83,73 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         }
     }
     
-    // Check for conflicting compression modes
-    if !compressible_fields.is_empty() && !compress_on_init_fields.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "Cannot mix 'compressible' and 'compress_on_init' flags on different accounts. Use either all 'compressible' or all 'compress_on_init'."
-        ).to_compile_error();
+    // Use CPDA fields for processing
+    let fields_to_process = &cpda_fields;
+    
+    // Find the first Signer field to use as fee payer
+    let fee_payer_ident = accs.fields.iter().find_map(|af| {
+        if let AccountField::Field(f) = af {
+            if matches!(&f.ty, Ty::Signer) {
+                Some(&f.ident)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+    
+    // Find required fields by name
+    let mut required_fields = std::collections::HashMap::new();
+    for af in &accs.fields {
+        if let AccountField::Field(f) = af {
+            let name = f.ident.to_string();
+            match name.as_str() {
+                "compression_config" | "rent_recipient" | 
+                "compressed_token_program_cpi_authority" | 
+                "compressed_token_program" | "authority" => {
+                    required_fields.insert(name, &f.ident);
+                }
+                _ => {}
+            }
+        }
     }
     
-    // Determine which fields to process
-    let fields_to_process = if !compress_on_init_fields.is_empty() {
-        &compress_on_init_fields
-    } else if !compressible_fields.is_empty() {
-        &compressible_fields
-    } else {
-        &Vec::new()
-    };
+    let has_all_required = required_fields.contains_key("compression_config") &&
+                          required_fields.contains_key("compressed_token_program_cpi_authority") &&
+                          required_fields.contains_key("compressed_token_program");
     
     // Generate the batched finalize for compressed operations
-    let compressed_finalize = if !fields_to_process.is_empty() || cmint_field.is_some() {
+    // Get the payer from the CMint if it exists
+    let cmint_payer = cmint_field.and_then(|cmint_ident| {
+        accs.fields.iter().find_map(|af| {
+            if let AccountField::Field(f) = af {
+                if &f.ident == cmint_ident {
+                    f.constraints.cmint.as_ref().and_then(|c| c.payer.as_ref())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    });
+    
+    let compressed_finalize = if (!fields_to_process.is_empty() || cmint_field.is_some()) 
+        && (cmint_payer.is_some() || fee_payer_ident.is_some())
+        && has_all_required {
         use quote::format_ident;
+        
+        
+        let fee_payer = if let Some(payer_expr) = cmint_payer {
+            quote! { #payer_expr }
+        } else {
+            let ident = fee_payer_ident.unwrap();
+            quote! { #ident }
+        };
+        let compression_config = required_fields.get("compression_config").unwrap();
+        let compressed_token_program_cpi_authority = required_fields.get("compressed_token_program_cpi_authority").unwrap();
+        let compressed_token_program = required_fields.get("compressed_token_program").unwrap();
 
         // Build per-compressible account blocks
         let mut compress_blocks: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -114,8 +157,16 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
 
         for (index, ident) in fields_to_process.iter().enumerate() {
             let idx_lit = index as u8;
-            // Build the corresponding "<field>_address_tree_info" identifier from ix args
-            let info_ident = format_ident!("{}_address_tree_info", ident);
+            // Build the corresponding address_tree_info identifier from ix args
+            // For now, use a simple mapping - pool_state -> pool, observation_state -> observation
+            let info_name = if ident.to_string().contains("pool") {
+                "pool"
+            } else if ident.to_string().contains("observation") {
+                "observation"
+            } else {
+                &ident.to_string()
+            };
+            let info_ident = format_ident!("{}_address_tree_info", info_name);
 
             // Resolve the account type for generic prepare function
             let acc_ty_path = match accs
@@ -158,16 +209,26 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             let compressed_infos_ident = format_ident!("{}_compressed_infos", ident);
             new_address_params_idents.push(quote! { #new_addr_params_ident });
 
-            // Different preparation based on compression mode
-            let prepare_fn = if !compress_on_init_fields.is_empty() {
-                quote! { prepare_accounts_for_compression_on_init }
-            } else {
-                quote! { prepare_accounts_for_empty_compression_on_init }
-            };
+            // Use prepare_accounts_for_compression_on_init for CPDA fields
+            let prepare_fn = quote! { prepare_accounts_for_compression_on_init };
             
+            // Get output_state_tree_index from CPDA constraint or instruction data
+            let output_tree_expr = accs.fields.iter().find_map(|af| {
+                if let AccountField::Field(field) = af {
+                    if field.ident == **ident {
+                        if let Some(cpda) = &field.constraints.cpda {
+                            return cpda.output_state_tree_index.as_ref().map(|e| quote! { #e });
+                        }
+                    }
+                }
+                None
+            }).unwrap_or_else(|| quote! { 0u8 });
+            
+            let tree_info_ident = format_ident!("{}_tree_info", ident);
             compress_blocks.push(quote! {
                 // Build new address params for #ident
-                let #new_addr_params_ident = compression_params.#info_ident
+                let #tree_info_ident = compression_params.#info_ident.clone();
+                let #new_addr_params_ident = #tree_info_ident
                     .into_new_address_params_assigned_packed(
                         self.#ident.key().to_bytes(),
                         true,
@@ -190,7 +251,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     &[#acc_expr],
                     &[#compressed_address_ident],
                     &[#new_addr_params_ident],
-                    &[compression_params.output_state_tree_index],
+                    &[#output_tree_expr],
                     &cpi_accounts,
                     &address_space,
                     &self.rent_recipient,
@@ -199,7 +260,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             });
         }
 
-        let compressible_count = fields_to_process.len() as u32;
+        let compressible_count = fields_to_process.len() as u8;
         let cmint_index = if cmint_field.is_some() {
             quote! { Some(#compressible_count) }
         } else {
@@ -210,15 +271,74 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
 
         // Build mint actions extraction and mint creation block
         let cmint_block = if let Some(cmint_ident) = mint_ident {
+            // Get CMint constraints for this field
+            let cmint_constraints = accs.fields.iter().find_map(|af| {
+                if let AccountField::Field(f) = af {
+                    if f.ident.to_string() == cmint_ident.to_string() {
+                        return f.constraints.cmint.as_ref();
+                    }
+                }
+                None
+            });
+            
+            // Build expressions from constraints or fallback to instruction data
+            let cmint_proof_expr = cmint_constraints
+                .and_then(|c| c.proof.as_ref())
+                .map(|e| quote! { #e })
+                .unwrap_or_else(|| quote! { panic!("CMint proof constraint is required") });
+                
+            let cmint_address_tree_info_expr = cmint_constraints
+                .and_then(|c| c.address_tree_info.as_ref())
+                .map(|e| quote! { #e })
+                .unwrap_or_else(|| quote! { panic!("CMint address_tree_info constraint is required") });
+                
+            let cmint_output_tree_expr = cmint_constraints
+                .and_then(|c| c.output_state_tree_index.as_ref())
+                .map(|e| quote! { #e })
+                .unwrap_or_else(|| quote! { panic!("CMint output_state_tree_index constraint is required") });
+                
+            let cmint_authority_expr = cmint_constraints
+                .and_then(|c| c.authority.as_ref())
+                .map(|e| quote! { {
+                    let __auth = &self.#e;
+                    __auth.key() 
+                }})
+                .unwrap_or_else(|| quote! { self.authority.key() });
+                
+            let cmint_payer_expr = cmint_constraints
+                .and_then(|c| c.payer.as_ref())
+                .map(|e| quote! { {
+                    let __payer = &self.#e;
+                    __payer.key()
+                }})
+                .unwrap_or_else(|| {
+                    if let Some(fee_payer) = fee_payer_ident {
+                        quote! { self.#fee_payer.key() }
+                    } else {
+                        quote! { self.creator.key() }
+                    }
+                });
+                
+            // Get mint bump from constraint
+            let cmint_bump_expr = cmint_constraints
+                .and_then(|c| c.mint_signer_bump.as_ref())
+                .map(|e| quote! { #e })
+                .unwrap_or_else(|| quote! { panic!("CMint mint_signer_bump constraint is required") });
+            
             quote! {
                 // Drain queued CMint actions
                 let __mint_actions = self.#cmint_ident.take_actions();
 
                 if !__mint_actions.is_empty() {
-                    // Tree accounts indices
-                    let output_state_queue_idx: u8 = 0;
-                    let address_tree_idx: u8 = 1;
-                    let output_state_queue = *cpi_accounts.tree_accounts().unwrap()[output_state_queue_idx as usize].key;
+                    // Get tree indices from constraints
+                    let output_state_tree_index = #cmint_output_tree_expr;
+                    let __address_tree_info = #cmint_address_tree_info_expr;
+                    let address_tree_idx = __address_tree_info.address_merkle_tree_pubkey_index;
+                    let address_queue_idx = __address_tree_info.address_queue_pubkey_index;
+                    let root_index = __address_tree_info.root_index;
+                    
+                    // Get tree accounts using the indices
+                    let output_state_queue = *cpi_accounts.tree_accounts().unwrap()[output_state_tree_index as usize].key;
                     let address_tree_pubkey = *cpi_accounts.tree_accounts().unwrap()[address_tree_idx as usize].key;
 
                     // Derive compressed mint address from SPL mint addr (self.#cmint_ident is used as SPL mint key)
@@ -230,10 +350,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     // Build compressed mint with context
                     let compressed_mint_with_context = light_ctoken_types::instructions::mint_action::CompressedMintWithContext::new(
                         mint_compressed_address,
-                        compression_params.lp_mint_address_tree_info.root_index,
+                        root_index,
                         self.#cmint_ident.decimals.unwrap_or(9),
-                        Some(self.authority.key().into()),
-                        Some(self.authority.key().into()),
+                        Some(#cmint_authority_expr.into()),
+                        Some(#cmint_authority_expr.into()),
                         self.#cmint_ident.key().into(),
                     );
 
@@ -250,10 +370,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     let inputs = light_compressed_token_sdk::instructions::CreateMintInputs {
                         compressed_mint_inputs: compressed_mint_with_context,
                         mint_seed: self.#cmint_ident.key(),
-                        mint_bump: compression_params.lp_mint_bump,
-                        authority: self.authority.key().into(),
-                        payer: self.creator.key(),
-                        proof: compression_params.proof.0.map(|p| light_compressed_token_sdk::CompressedProof::from(p)),
+                        mint_bump: #cmint_bump_expr,
+                        authority: #cmint_authority_expr.into(),
+                        payer: #cmint_payer_expr,
+                        proof: #cmint_proof_expr.0.map(|p| light_compressed_token_sdk::CompressedProof::from(p)),
                         address_tree: address_tree_pubkey,
                         output_queue: output_state_queue,
                         actions,
@@ -265,23 +385,31 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                             light_compressed_token_sdk::instructions::MintActionInputs::new_create_mint(inputs),
                             Some(light_ctoken_types::instructions::mint_action::CpiContext::last_cpi_create_mint(
                                 address_tree_idx,
-                                output_state_queue_idx,
+                                output_state_tree_index,
                                 #compressible_count,
                             )),
                             Some(cpi_accounts.cpi_context().unwrap().key()),
-                        )?;
+                        ).map_err(|_| anchor_lang::error::ErrorCode::AccountDidNotSerialize)?;
 
                     // Accounts for CPI
                     let mut account_infos = cpi_accounts.to_account_infos();
                     account_infos.extend([
-                        self.compressed_token_program_cpi_authority.clone(),
-                        self.compressed_token_program.clone(),
-                        self.authority.clone(),
-                        self.creator.clone(),
-                        // recipients
-                        self.lp_vault.clone(),
-                        self.creator_lp_token.clone(),
+                        self.#compressed_token_program_cpi_authority.to_account_info(),
+                        self.#compressed_token_program.to_account_info(),
+                        self.authority.to_account_info(),
                     ]);
+                    
+                    // Add mint_signer if provided
+                    if let Some(mint_signer) = &self.#cmint_ident.mint_signer {
+                        account_infos.push(mint_signer.clone());
+                    } else {
+                        // If no explicit mint_signer provided, use the CMint account itself
+                        account_infos.push(self.#cmint_ident.to_account_info());
+                    }
+                    
+                    account_infos.push(self.#fee_payer.to_account_info());
+                    
+                    // Recipients will be added from remaining accounts based on mint actions
 
                     // Signer seeds
                     let mut signer_seeds: Vec<&[&[u8]]> = Vec::new();
@@ -309,36 +437,38 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
 
         // Build the full compressed finalize block
         quote! {
-            #[cfg(feature = "compressed-mint")]
+            // Compressed accounts finalization
             {
-                use borsh::BorshDeserialize;
 
                 // Build CPI accounts with CPI context signer
                 let cpi_accounts = light_sdk::cpi::CpiAccountsSmall::new_with_config(
-                    &self.creator,
+                    &self.#fee_payer,
                     _remaining,
                     light_sdk_types::CpiAccountsConfig::new_with_cpi_context(crate::LIGHT_CPI_SIGNER),
                 );
 
                 // Load compression config
-                let compression_config = light_sdk::compressible::CompressibleConfig::load_checked(&self.compression_config, &crate::ID)?;
-                let address_space = compression_config.address_space;
+                let compression_config_data = light_sdk::compressible::CompressibleConfig::load_checked(&self.#compression_config, &crate::ID)?;
+                let address_space = compression_config_data.address_space;
 
                 // Parse compression params from ix_data
-                #[derive(BorshDeserialize)]
-                struct InitializeCompressionParams {
-                    pub pool_address_tree_info: light_sdk::instruction::PackedAddressTreeInfo,
-                    pub observation_address_tree_info: light_sdk::instruction::PackedAddressTreeInfo,
-                    pub lp_mint_address_tree_info: light_sdk::instruction::PackedAddressTreeInfo,
-                    pub lp_mint_bump: u8,
-                    pub creator_lp_token_bump: u8,
-                    pub proof: light_sdk::instruction::borsh_compat::ValidityProof,
-                    pub output_state_tree_index: u8,
-                }
+                // Skip discriminator (8 bytes) and other instruction arguments
                 let compression_params = {
-                    let mut slice = &_ix_data[8..];
-                    InitializeCompressionParams::try_from_slice(&mut slice)
-                        .map_err(|_| anchor_lang::error::ErrorCode::InvalidInstructionData)?
+                    let mut ix_data_cursor = if _ix_data.len() >= 8 {
+                        &_ix_data[8..]
+                    } else {
+                        _ix_data
+                    };
+                    
+                    // Skip other instruction arguments (init_amount_0: u64, init_amount_1: u64, open_time: u64)
+                    // Each u64 is 8 bytes, so skip 24 bytes total
+                    if ix_data_cursor.len() >= 24 {
+                        ix_data_cursor = &ix_data_cursor[24..];
+                    }
+                    
+                    // Now deserialize InitializeCompressionParams
+                    InitializeCompressionParams::deserialize(&mut ix_data_cursor)
+                        .map_err(|_| anchor_lang::error::ErrorCode::InstructionDidNotDeserialize)?
                 };
 
                 // Collect compressed infos for all compressible accounts
@@ -367,7 +497,18 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         quote! {}
     };
     
-    // Generate auto-close for compress_on_init fields
+    // Generate auto-close for CPDA fields with compress_on_init
+    let compress_on_init_fields: Vec<_> = accs.fields.iter().filter_map(|af| {
+        if let AccountField::Field(f) = af {
+            if let Some(cpda) = &f.constraints.cpda {
+                if cpda.compress_on_init {
+                    return Some(&f.ident);
+                }
+            }
+        }
+        None
+    }).collect();
+    
     let auto_close_block = if !compress_on_init_fields.is_empty() {
         let close_statements: Vec<_> = compress_on_init_fields.iter().map(|ident| {
             quote! {
@@ -404,8 +545,8 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         // Skip these - CMint handled in batched finalize
                         quote! {}
                     }
-                    Ty::Account(_) if f.constraints.init.as_ref().map(|i| i.compressible).unwrap_or(false) => {
-                        // Skip compressible accounts - handled in batched finalize
+                    Ty::Account(_) if f.constraints.cpda.is_some() => {
+                        // Skip CPDA accounts - handled in batched finalize
                         quote! {}
                     }
                     _ => quote! {

@@ -91,6 +91,10 @@ impl<'info> ToAccountInfos<'info> for Signer<'info> {
     }
 }
 
+impl<'info> crate::AccountsFinalize<'info> for Signer<'info> {
+    // Uses default implementation
+}
+
 impl<'info> AsRef<AccountInfo<'info>> for Signer<'info> {
     fn as_ref(&self) -> &AccountInfo<'info> {
         self.info

@@ -62,6 +62,20 @@ impl<'info, T: ToAccountInfos<'info>> ToAccountInfos<'info> for Option<T> {
     }
 }
 
+impl<'info, T: crate::AccountsFinalize<'info>> crate::AccountsFinalize<'info> for Option<T> {
+    fn finalize(
+        &self,
+        program_id: &Pubkey,
+        remaining_accounts: &[AccountInfo<'info>],
+        ix_data: &[u8],
+    ) -> Result<()> {
+        if let Some(account) = self {
+            account.finalize(program_id, remaining_accounts, ix_data)?;
+        }
+        Ok(())
+    }
+}
+
 impl<T: ToAccountMetas> ToAccountMetas for Option<T> {
     fn to_account_metas(&self, is_signer: Option<bool>) -> Vec<AccountMeta> {
         self.as_ref()

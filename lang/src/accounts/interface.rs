@@ -135,6 +135,10 @@ impl<'info, T> ToAccountInfos<'info> for Interface<'info, T> {
     }
 }
 
+impl<'info, T> crate::AccountsFinalize<'info> for Interface<'info, T> {
+    // Uses default implementation
+}
+
 impl<'info, T: AccountDeserialize> AccountsExit<'info> for Interface<'info, T> {}
 
 impl<T: AccountDeserialize> Key for Interface<'_, T> {

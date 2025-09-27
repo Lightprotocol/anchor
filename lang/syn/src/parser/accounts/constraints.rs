@@ -28,26 +28,12 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
     let c = match kw.as_str() {
         "init" => ConstraintToken::Init(Context::new(
             ident.span(),
-            ConstraintInit { if_needed: false, compressible: false, compress_on_init: false },
+            ConstraintInit { if_needed: false },
         )),
         "init_if_needed" => ConstraintToken::Init(Context::new(
             ident.span(),
-            ConstraintInit { if_needed: true, compressible: false, compress_on_init: false },
+            ConstraintInit { if_needed: true },
         )),
-        "compressible" => {
-            // For prepare-only compression (no auto-close)
-            ConstraintToken::Init(Context::new(
-                ident.span(),
-                ConstraintInit { if_needed: false, compressible: true, compress_on_init: false },
-            ))
-        }
-        "compress_on_init" => {
-            // For immediate compression with auto-close
-            ConstraintToken::Init(Context::new(
-                ident.span(),
-                ConstraintInit { if_needed: false, compressible: false, compress_on_init: true },
-            ))
-        }
         "zero" => ConstraintToken::Zeroed(Context::new(ident.span(), ConstraintZeroed {})),
         "mut" => ConstraintToken::Mut(Context::new(
             ident.span(),
@@ -316,7 +302,52 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                 _ => return Err(ParseError::new(ident.span(), "Invalid attribute")),
             }
         }
-        "cmint" => {
+            "cpda" => {
+                stream.parse::<Token![::]>()?;
+                let kw = stream.call(Ident::parse_any)?.to_string();
+                stream.parse::<Token![=]>()?;
+
+                let span = ident
+                    .span()
+                    .join(stream.span())
+                    .unwrap_or_else(|| ident.span());
+
+                match kw.as_str() {
+                    "address_tree_info" => ConstraintToken::CPDAAddressTreeInfo(Context::new(
+                        span,
+                        ConstraintCPDAAddressTreeInfo {
+                            address_tree_info: stream.parse()?,
+                        },
+                    )),
+                    "proof" => ConstraintToken::CPDAProof(Context::new(
+                        span,
+                        ConstraintCPDAProof {
+                            proof: stream.parse()?,
+                        },
+                    )),
+                    "output_state_tree_index" => ConstraintToken::CPDAOutputStateTreeIndex(Context::new(
+                        span,
+                        ConstraintCPDAOutputStateTreeIndex {
+                            output_state_tree_index: stream.parse()?,
+                        },
+                    )),
+                    _ => {
+                        stream.parse::<Token![=]>()?;
+                        return Err(ParseError::new(
+                            ident.span(),
+                            format!("invalid cpda constraint: {}", kw),
+                        ));
+                    }
+                }
+            }
+            "compress_on_init" => {
+                // This is a special flag that marks a CPDA for immediate compression
+                ConstraintToken::CPDACompressOnInit(Context::new(
+                    ident.span(),
+                    ConstraintCPDACompressOnInit {},
+                ))
+            }
+            "cmint" => {
             stream.parse::<Token![:]>()?;
             stream.parse::<Token![:]>()?;
             let kw = stream.call(Ident::parse_any)?.to_string();
@@ -328,16 +359,28 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                 .unwrap_or_else(|| ident.span());
 
             match kw.as_str() {
-                "authority" => ConstraintToken::CMintAuthority(Context::new(
-                    span,
-                    ConstraintCMintAuthority {
-                        authority: stream.parse()?,
-                    },
-                )),
-                "decimals" => ConstraintToken::CMintDecimals(Context::new(
+                        "authority" => ConstraintToken::CMintAuthority(Context::new(
+                            span,
+                            ConstraintCMintAuthority {
+                                authority: stream.parse()?,
+                            },
+                        )),
+                        "payer" => ConstraintToken::CMintPayer(Context::new(
+                            span,
+                            ConstraintCMintPayer {
+                                payer: stream.parse()?,
+                            },
+                        )),
+                        "decimals" => ConstraintToken::CMintDecimals(Context::new(
                     span,
                     ConstraintCMintDecimals {
                         decimals: stream.parse::<syn::LitInt>()?.base10_parse()?,
+                    },
+                )),
+                "mint_signer" => ConstraintToken::CMintSigner(Context::new(
+                    span,
+                    ConstraintCMintSigner {
+                        signer: stream.parse()?,
                     },
                 )),
                 "mint_signer_seeds" => {
@@ -364,12 +407,30 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                         ConstraintCMintProgramAuthoritySeeds { seeds: seeds.into_iter().collect() },
                     ))
                 }
-                "program_authority_bump" => ConstraintToken::CMintProgramAuthorityBump(Context::new(
-                    span,
-                    ConstraintCMintProgramAuthorityBump {
-                        bump: stream.parse()?,
-                    },
-                )),
+                        "program_authority_bump" => ConstraintToken::CMintProgramAuthorityBump(Context::new(
+                            span,
+                            ConstraintCMintProgramAuthorityBump {
+                                bump: stream.parse()?,
+                            },
+                        )),
+                        "address_tree_info" => ConstraintToken::CMintAddressTreeInfo(Context::new(
+                            span,
+                            ConstraintCMintAddressTreeInfo {
+                                address_tree_info: stream.parse()?,
+                            },
+                        )),
+                        "proof" => ConstraintToken::CMintProof(Context::new(
+                            span,
+                            ConstraintCMintProof {
+                                proof: stream.parse()?,
+                            },
+                        )),
+                        "output_state_tree_index" => ConstraintToken::CMintOutputStateTreeIndex(Context::new(
+                            span,
+                            ConstraintCMintOutputStateTreeIndex {
+                                output_state_tree_index: stream.parse()?,
+                            },
+                        )),
                 _ => return Err(ParseError::new(ident.span(), "Invalid cmint attribute")),
             }
         }
@@ -626,11 +687,21 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub realloc_zero: Option<Context<ConstraintReallocZero>>,
     // CMint constraints
     pub cmint_authority: Option<Context<ConstraintCMintAuthority>>,
+    pub cmint_payer: Option<Context<ConstraintCMintPayer>>,
     pub cmint_decimals: Option<Context<ConstraintCMintDecimals>>,
+    pub cmint_signer: Option<Context<ConstraintCMintSigner>>,
     pub cmint_signer_seeds: Option<Context<ConstraintCMintSignerSeeds>>,
     pub cmint_signer_bump: Option<Context<ConstraintCMintSignerBump>>,
     pub cmint_program_authority_seeds: Option<Context<ConstraintCMintProgramAuthoritySeeds>>,
     pub cmint_program_authority_bump: Option<Context<ConstraintCMintProgramAuthorityBump>>,
+    pub cmint_address_tree_info: Option<Context<ConstraintCMintAddressTreeInfo>>,
+    pub cmint_proof: Option<Context<ConstraintCMintProof>>,
+    pub cmint_output_state_tree_index: Option<Context<ConstraintCMintOutputStateTreeIndex>>,
+    // CPDA constraints
+    pub cpda_address_tree_info: Option<Context<ConstraintCPDAAddressTreeInfo>>,
+    pub cpda_proof: Option<Context<ConstraintCPDAProof>>,
+    pub cpda_output_state_tree_index: Option<Context<ConstraintCPDAOutputStateTreeIndex>>,
+    pub cpda_compress_on_init: Option<Context<ConstraintCPDACompressOnInit>>,
 }
 
 impl<'ty> ConstraintGroupBuilder<'ty> {
@@ -678,11 +749,20 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc_payer: None,
             realloc_zero: None,
             cmint_authority: None,
+            cmint_payer: None,
             cmint_decimals: None,
+            cmint_signer: None,
             cmint_signer_seeds: None,
             cmint_signer_bump: None,
             cmint_program_authority_seeds: None,
             cmint_program_authority_bump: None,
+            cmint_address_tree_info: None,
+            cmint_proof: None,
+            cmint_output_state_tree_index: None,
+            cpda_address_tree_info: None,
+            cpda_proof: None,
+            cpda_output_state_tree_index: None,
+            cpda_compress_on_init: None,
         }
     }
 
@@ -909,11 +989,20 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc_payer,
             realloc_zero,
             cmint_authority,
+            cmint_payer,
             cmint_decimals,
+            cmint_signer,
             cmint_signer_seeds,
             cmint_signer_bump,
             cmint_program_authority_seeds,
             cmint_program_authority_bump,
+            cmint_address_tree_info,
+            cmint_proof,
+            cmint_output_state_tree_index,
+            cpda_address_tree_info,
+            cpda_proof,
+            cpda_output_state_tree_index,
+            cpda_compress_on_init,
         } = self;
 
         // Converts Option<Context<T>> -> Option<T>.
@@ -1080,8 +1169,6 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
         Ok(ConstraintGroup {
             init: init.as_ref().map(|i| Ok(ConstraintInitGroup {
                 if_needed: i.if_needed,
-                compressible: i.compressible,
-                compress_on_init: i.compress_on_init,
                 seeds: seeds.clone(),
                 payer: into_inner!(payer.clone()).unwrap().target,
                 space: space.clone().map(|s| s.space.clone()),
@@ -1153,16 +1240,35 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             seeds,
             token_account: if !is_init {token_account} else {None},
             mint: if !is_init {mint} else {None},
-            cmint: if cmint_authority.is_some() || cmint_decimals.is_some() || 
-                       cmint_signer_seeds.is_some() || cmint_signer_bump.is_some() ||
-                       cmint_program_authority_seeds.is_some() || cmint_program_authority_bump.is_some() {
+            cmint: if cmint_authority.is_some() || cmint_payer.is_some() || cmint_decimals.is_some() || 
+                       cmint_signer.is_some() || cmint_signer_seeds.is_some() || 
+                       cmint_signer_bump.is_some() ||
+                       cmint_program_authority_seeds.is_some() || cmint_program_authority_bump.is_some() ||
+                       cmint_address_tree_info.is_some() || cmint_proof.is_some() || 
+                       cmint_output_state_tree_index.is_some() {
                 Some(ConstraintCMintGroup {
                     authority: cmint_authority.map(|c| c.into_inner().authority),
                     decimals: cmint_decimals.map(|c| c.into_inner().decimals),
+                    payer: cmint_payer.map(|c| c.into_inner().payer),
+                    mint_signer: cmint_signer.map(|c| c.into_inner().signer),
                     mint_signer_seeds: cmint_signer_seeds.map(|c| c.into_inner().seeds),
                     mint_signer_bump: cmint_signer_bump.map(|c| c.into_inner().bump),
                     program_authority_seeds: cmint_program_authority_seeds.map(|c| c.into_inner().seeds),
                     program_authority_bump: cmint_program_authority_bump.map(|c| c.into_inner().bump),
+                    address_tree_info: cmint_address_tree_info.map(|c| c.into_inner().address_tree_info),
+                    proof: cmint_proof.map(|c| c.into_inner().proof),
+                    output_state_tree_index: cmint_output_state_tree_index.map(|c| c.into_inner().output_state_tree_index),
+                })
+            } else {
+                None
+            },
+            cpda: if cpda_address_tree_info.is_some() || cpda_proof.is_some() || 
+                     cpda_output_state_tree_index.is_some() || cpda_compress_on_init.is_some() {
+                Some(ConstraintCPDAGroup {
+                    compress_on_init: cpda_compress_on_init.is_some(),
+                    address_tree_info: cpda_address_tree_info.map(|c| c.into_inner().address_tree_info),
+                    proof: cpda_proof.map(|c| c.into_inner().proof),
+                    output_state_tree_index: cpda_output_state_tree_index.map(|c| c.into_inner().output_state_tree_index),
                 })
             } else {
                 None
@@ -1231,28 +1337,27 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                 self.add_extension_permanent_delegate(c)
             }
             ConstraintToken::CMintAuthority(c) => self.add_cmint_authority(c),
+            ConstraintToken::CMintPayer(c) => self.add_cmint_payer(c),
             ConstraintToken::CMintDecimals(c) => self.add_cmint_decimals(c),
+            ConstraintToken::CMintSigner(c) => self.add_cmint_signer(c),
             ConstraintToken::CMintSignerSeeds(c) => self.add_cmint_signer_seeds(c),
             ConstraintToken::CMintSignerBump(c) => self.add_cmint_signer_bump(c),
             ConstraintToken::CMintProgramAuthoritySeeds(c) => self.add_cmint_program_authority_seeds(c),
             ConstraintToken::CMintProgramAuthorityBump(c) => self.add_cmint_program_authority_bump(c),
+            ConstraintToken::CMintAddressTreeInfo(c) => self.add_cmint_address_tree_info(c),
+            ConstraintToken::CMintProof(c) => self.add_cmint_proof(c),
+            ConstraintToken::CMintOutputStateTreeIndex(c) => self.add_cmint_output_state_tree_index(c),
+            ConstraintToken::CPDAAddressTreeInfo(c) => self.add_cpda_address_tree_info(c),
+            ConstraintToken::CPDAProof(c) => self.add_cpda_proof(c),
+            ConstraintToken::CPDAOutputStateTreeIndex(c) => self.add_cpda_output_state_tree_index(c),
+            ConstraintToken::CPDACompressOnInit(c) => self.add_cpda_compress_on_init(c),
         }
     }
 
     fn add_init(&mut self, c: Context<ConstraintInit>) -> ParseResult<()> {
         if let Some(existing) = &mut self.init {
-            // Merge compressible flag if adding compressible to existing init
-            if c.inner.compressible && !existing.inner.compressible && !existing.inner.compress_on_init {
-                existing.inner.compressible = true;
-                return Ok(());
-            }
-            // Merge compress_on_init flag if adding to existing init
-            if c.inner.compress_on_init && !existing.inner.compressible && !existing.inner.compress_on_init {
-                existing.inner.compress_on_init = true;
-                return Ok(());
-            }
-            // Merge init with existing compressible/compress_on_init
-            if !c.inner.compressible && !c.inner.compress_on_init && (existing.inner.compressible || existing.inner.compress_on_init) {
+            // Merge if_needed flag if different
+            if c.inner.if_needed != existing.inner.if_needed {
                 existing.inner.if_needed = c.inner.if_needed;
                 return Ok(());
             }
@@ -1615,11 +1720,27 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
         Ok(())
     }
 
+    fn add_cmint_payer(&mut self, c: Context<ConstraintCMintPayer>) -> ParseResult<()> {
+        if self.cmint_payer.is_some() {
+            return Err(ParseError::new(c.span(), "cmint payer already provided"));
+        }
+        self.cmint_payer.replace(c);
+        Ok(())
+    }
+
     fn add_cmint_decimals(&mut self, c: Context<ConstraintCMintDecimals>) -> ParseResult<()> {
         if self.cmint_decimals.is_some() {
             return Err(ParseError::new(c.span(), "cmint decimals already provided"));
         }
         self.cmint_decimals.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_signer(&mut self, c: Context<ConstraintCMintSigner>) -> ParseResult<()> {
+        if self.cmint_signer.is_some() {
+            return Err(ParseError::new(c.span(), "cmint signer already provided"));
+        }
+        self.cmint_signer.replace(c);
         Ok(())
     }
 
@@ -1652,6 +1773,62 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             return Err(ParseError::new(c.span(), "cmint program_authority_bump already provided"));
         }
         self.cmint_program_authority_bump.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_address_tree_info(&mut self, c: Context<ConstraintCMintAddressTreeInfo>) -> ParseResult<()> {
+        if self.cmint_address_tree_info.is_some() {
+            return Err(ParseError::new(c.span(), "cmint address_tree_info already provided"));
+        }
+        self.cmint_address_tree_info.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_proof(&mut self, c: Context<ConstraintCMintProof>) -> ParseResult<()> {
+        if self.cmint_proof.is_some() {
+            return Err(ParseError::new(c.span(), "cmint proof already provided"));
+        }
+        self.cmint_proof.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_output_state_tree_index(&mut self, c: Context<ConstraintCMintOutputStateTreeIndex>) -> ParseResult<()> {
+        if self.cmint_output_state_tree_index.is_some() {
+            return Err(ParseError::new(c.span(), "cmint output_state_tree_index already provided"));
+        }
+        self.cmint_output_state_tree_index.replace(c);
+        Ok(())
+    }
+
+    fn add_cpda_address_tree_info(&mut self, c: Context<ConstraintCPDAAddressTreeInfo>) -> ParseResult<()> {
+        if self.cpda_address_tree_info.is_some() {
+            return Err(ParseError::new(c.span(), "cpda address_tree_info already provided"));
+        }
+        self.cpda_address_tree_info.replace(c);
+        Ok(())
+    }
+
+    fn add_cpda_proof(&mut self, c: Context<ConstraintCPDAProof>) -> ParseResult<()> {
+        if self.cpda_proof.is_some() {
+            return Err(ParseError::new(c.span(), "cpda proof already provided"));
+        }
+        self.cpda_proof.replace(c);
+        Ok(())
+    }
+
+    fn add_cpda_output_state_tree_index(&mut self, c: Context<ConstraintCPDAOutputStateTreeIndex>) -> ParseResult<()> {
+        if self.cpda_output_state_tree_index.is_some() {
+            return Err(ParseError::new(c.span(), "cpda output_state_tree_index already provided"));
+        }
+        self.cpda_output_state_tree_index.replace(c);
+        Ok(())
+    }
+
+    fn add_cpda_compress_on_init(&mut self, c: Context<ConstraintCPDACompressOnInit>) -> ParseResult<()> {
+        if self.cpda_compress_on_init.is_some() {
+            return Err(ParseError::new(c.span(), "compress_on_init already provided"));
+        }
+        self.cpda_compress_on_init.replace(c);
         Ok(())
     }
 

@@ -41,6 +41,14 @@ pub fn finalize_compressed_batch<'info>(
 }
 
 #[cfg(feature = "compressed-mint-light")]
+impl From<light_compressed_token_sdk::TokenSdkError> for crate::error::Error {
+    fn from(err: light_compressed_token_sdk::TokenSdkError) -> Self {
+        crate::error::Error::from(crate::error::ErrorCode::AccountDidNotSerialize)
+            .with_account_name(format!("TokenSdkError: {:?}", err))
+    }
+}
+
+#[cfg(feature = "compressed-mint-light")]
 /// Context for batched compressed operations (CPDAs and CMints)
 pub struct CompressedBatchContext {
     pub cpda_indices: Vec<u32>,
@@ -239,9 +247,19 @@ pub fn finalize_compressed_batch<'info>(
             compressed_token_program.clone(),
             compressed_token_program_cpi_authority.clone(),
             authority.clone(),
-            payer.clone(),
-            system_program.clone(),
         ];
+
+        // Add mint_signer if we have a CMint
+        if let Some(mint) = mint {
+            if let Some(mint_signer) = &mint.mint_signer {
+                account_infos.push(mint_signer.clone());
+            } else {
+                // If no explicit mint_signer provided, use the CMint account itself
+                account_infos.push(mint.to_account_info());
+            }
+        }
+
+        account_infos.extend([payer.clone(), system_program.clone()]);
 
         // Add CPDA accounts
         let cpda_start_index = 6;

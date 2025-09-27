@@ -14,6 +14,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
     } = generics(accs);
 
     // Deserialization for each field
+    let all_fields = &accs.fields;  // Capture all fields for CMint seed extraction
     let deser_fields: Vec<proc_macro2::TokenStream> = accs
         .fields
         .iter()
@@ -73,29 +74,92 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         if matches!(&f.ty, crate::Ty::CMint(_)) {
                             let ident = &f.ident;
                             let cmint_setup = if let Some(cmint_group) = &f.constraints.cmint {
-                                let authority = cmint_group.authority.as_ref().map(|a| quote! { 
-                                    #ident.authority = Some(#a);
-                                });
+                                let authority = cmint_group.authority.as_ref().map(|a| quote! { {
+                                    let __auth = &#a;
+                                    #ident.authority = Some(__auth.key());
+                                }});
                                 let decimals = cmint_group.decimals.map(|d| quote! { 
                                     #ident.decimals = Some(#d);
                                 });
-                                let mint_signer_seeds = cmint_group.mint_signer_seeds.as_ref().map(|seeds| {
-                                    let seed_bytes: Vec<_> = seeds.iter().map(|s| quote! {
-                                        anchor_lang::ToAccountInfo::to_account_info(&#s).key.to_bytes().to_vec()
-                                    }).collect();
-                                    quote! {
-                                        #ident.mint_signer_seeds = Some(vec![#(#seed_bytes),*]);
+                                let mint_signer = cmint_group.mint_signer.as_ref().map(|s| quote! { {
+                                    let __signer = &#s;
+                                    #ident.mint_signer = Some(__signer.to_account_info());
+                                }});
+                                
+                                // Auto-extract seeds and bump from linked mint_signer account if specified
+                                let (mint_signer_seeds, mint_signer_bump) = if let Some(signer_ref) = &cmint_group.mint_signer {
+                                    // Try to find the linked account's seeds and bump from its constraints
+                                    // Look for the account with matching name in the fields
+                                    let mut found_seeds = None;
+                                    let mut found_bump = None;
+                                    
+                                    // Extract the field name from the expression
+                                    let signer_name = quote! { #signer_ref }.to_string();
+                                    
+                                    // Find the corresponding field and extract its seeds
+                                    for field in all_fields {
+                                        if let crate::AccountField::Field(other_f) = field {
+                                            if other_f.ident.to_string() == signer_name {
+                                                if let Some(seeds_group) = &other_f.constraints.seeds {
+                                                    let seeds = &seeds_group.seeds;
+                                                    let seed_exprs: Vec<_> = seeds.iter().map(|s| {
+                                                        quote! { Vec::from(#s.as_ref()) }
+                                                    }).collect();
+                                                    found_seeds = Some(quote! {
+                                                        #ident.mint_signer_seeds = Some(vec![#(#seed_exprs),*]);
+                                                    });
+                                                    
+                                                    if let Some(bump) = &seeds_group.bump {
+                                                        found_bump = Some(quote! {
+                                                            #ident.mint_signer_bump = Some(#bump);
+                                                        });
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
                                     }
-                                });
-                                let mint_signer_bump = cmint_group.mint_signer_bump.as_ref().map(|b| quote! {
-                                    #ident.mint_signer_bump = Some(#b);
-                                });
+                                    
+                                    // If we found seeds from the linked account, use those
+                                    // Otherwise fall back to explicitly specified seeds
+                                    if found_seeds.is_some() {
+                                        (found_seeds, found_bump)
+                                    } else {
+                                        // Fall back to explicitly provided seeds if any
+                                        let seeds = cmint_group.mint_signer_seeds.as_ref().map(|seeds| {
+                                            let seed_exprs: Vec<_> = seeds.iter().map(|s| {
+                                                quote! { Vec::from(#s.as_ref()) }
+                                            }).collect();
+                                            quote! {
+                                                #ident.mint_signer_seeds = Some(vec![#(#seed_exprs),*]);
+                                            }
+                                        });
+                                        let bump = cmint_group.mint_signer_bump.as_ref().map(|b| quote! {
+                                            #ident.mint_signer_bump = Some(#b);
+                                        });
+                                        (seeds, bump)
+                                    }
+                                } else {
+                                    // No mint_signer specified, use explicitly provided seeds
+                                    let seeds = cmint_group.mint_signer_seeds.as_ref().map(|seeds| {
+                                        let seed_exprs: Vec<_> = seeds.iter().map(|s| {
+                                            quote! { Vec::from(#s.as_ref()) }
+                                        }).collect();
+                                        quote! {
+                                            #ident.mint_signer_seeds = Some(vec![#(#seed_exprs),*]);
+                                        }
+                                    });
+                                    let bump = cmint_group.mint_signer_bump.as_ref().map(|b| quote! {
+                                        #ident.mint_signer_bump = Some(#b);
+                                    });
+                                    (seeds, bump)
+                                };
                                 let program_authority_seeds = cmint_group.program_authority_seeds.as_ref().map(|seeds| {
-                                    let seed_bytes: Vec<_> = seeds.iter().map(|s| quote! {
-                                        anchor_lang::ToAccountInfo::to_account_info(&#s).key.to_bytes().to_vec()
+                                    let seed_exprs: Vec<_> = seeds.iter().map(|s| {
+                                        quote! { Vec::from(#s.as_ref()) }
                                     }).collect();
                                     quote! {
-                                        #ident.program_authority_seeds = Some(vec![#(#seed_bytes),*]);
+                                        #ident.program_authority_seeds = Some(vec![#(#seed_exprs),*]);
                                     }
                                 });
                                 let program_authority_bump = cmint_group.program_authority_bump.as_ref().map(|b| quote! {
@@ -105,6 +169,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                                 quote! {
                                     #authority
                                     #decimals
+                                    #mint_signer
                                     #mint_signer_seeds
                                     #mint_signer_bump
                                     #program_authority_seeds
@@ -143,14 +208,24 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         None => quote! {},
         Some(ix_api) => {
             let strct_inner = &ix_api;
-            let field_names: Vec<proc_macro2::TokenStream> = ix_api
+            // Collect field identifiers from the instruction declaration
+            let field_idents: Vec<proc_macro2::TokenStream> = ix_api
                 .iter()
                 .map(|expr: &Expr| match expr {
                     Expr::Type(expr_type) => {
                         let field = &expr_type.expr;
-                        quote! {
-                            #field
-                        }
+                        quote! { #field }
+                    }
+                    _ => panic!("Invalid instruction declaration"),
+                })
+                .collect();
+            // Generate re-bindings to move fields out of __args explicitly
+            let field_rebinds: Vec<proc_macro2::TokenStream> = ix_api
+                .iter()
+                .map(|expr: &Expr| match expr {
+                    Expr::Type(expr_type) => {
+                        let field = &expr_type.expr;
+                        quote! { let #field = __args.#field; }
                     }
                     _ => panic!("Invalid instruction declaration"),
                 })
@@ -161,10 +236,12 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 struct __Args {
                     #strct_inner
                 }
-                let __Args {
-                    #(#field_names),*
-                } = __Args::deserialize(&mut __ix_data)
+                let __args: __Args = __Args::deserialize(&mut __ix_data)
                     .map_err(|_| anchor_lang::error::ErrorCode::InstructionDidNotDeserialize)?;
+                // Move fields out of __args into local variables
+                #(#field_rebinds)*
+                // Prevent unused warning for the holder
+                let _ = __args;
             }
         }
     };

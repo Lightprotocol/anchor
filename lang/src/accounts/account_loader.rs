@@ -283,6 +283,10 @@ impl<'info, T: ZeroCopy + Owner> ToAccountInfos<'info> for AccountLoader<'info, 
     }
 }
 
+impl<'info, T: ZeroCopy + Owner> crate::AccountsFinalize<'info> for AccountLoader<'info, T> {
+    // Uses default implementation
+}
+
 impl<T: ZeroCopy + Owner> Key for AccountLoader<'_, T> {
     fn key(&self) -> Pubkey {
         *self.acc_info.key
