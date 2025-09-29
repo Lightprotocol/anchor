@@ -43,7 +43,7 @@ impl<'info> ToAccountInfos<'info> for AccountInfo<'info> {
     }
 }
 
-impl<'info> crate::AccountsFinalize<'info> for AccountInfo<'info> {
+impl<'info, B> crate::AccountsFinalize<'info, B> for AccountInfo<'info> {
     // Uses default implementation
 }
 

@@ -94,7 +94,7 @@ impl<'info, T: solana_program::sysvar::Sysvar> ToAccountInfos<'info> for Sysvar<
     }
 }
 
-impl<'info, T: solana_program::sysvar::Sysvar> crate::AccountsFinalize<'info> for Sysvar<'info, T> {
+impl<'info, B, T: solana_program::sysvar::Sysvar> crate::AccountsFinalize<'info, B> for Sysvar<'info, T> {
     // Uses default implementation
 }
 

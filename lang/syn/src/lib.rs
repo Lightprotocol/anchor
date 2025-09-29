@@ -817,6 +817,7 @@ pub enum ConstraintToken {
     CMintProof(Context<ConstraintCMintProof>),
     CMintOutputStateTreeIndex(Context<ConstraintCMintOutputStateTreeIndex>),
     // CPDA constraints
+    CPDAAuthority(Context<ConstraintCPDAAuthority>),
     CPDAAddressTreeInfo(Context<ConstraintCPDAAddressTreeInfo>),
     CPDAProof(Context<ConstraintCPDAProof>),
     CPDAOutputStateTreeIndex(Context<ConstraintCPDAOutputStateTreeIndex>),
@@ -1162,10 +1163,16 @@ pub struct ConstraintCMintGroup {
 
 #[derive(Debug, Clone)]
 pub struct ConstraintCPDAGroup {
-    pub compress_on_init: bool, // If true, compress immediately. If false, just prepare.
+    pub compress_on_init: bool,
+    pub authority: Option<Expr>,
     pub address_tree_info: Option<Expr>,
     pub proof: Option<Expr>,
     pub output_state_tree_index: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCPDAAuthority {
+    pub authority: Expr,
 }
 
 #[derive(Debug, Clone)]

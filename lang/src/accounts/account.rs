@@ -386,7 +386,7 @@ impl<'info, T: AccountSerialize + AccountDeserialize + Clone> ToAccountInfos<'in
     }
 }
 
-impl<'info, T: AccountSerialize + AccountDeserialize + Clone> crate::AccountsFinalize<'info>
+impl<'info, B, T: AccountSerialize + AccountDeserialize + Clone> crate::AccountsFinalize<'info, B>
     for Account<'info, T>
 {
     // Uses default implementation

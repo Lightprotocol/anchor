@@ -44,14 +44,15 @@ impl<'info, T: ToAccountInfos<'info>> ToAccountInfos<'info> for Box<T> {
     }
 }
 
-impl<'info, T: crate::AccountsFinalize<'info>> crate::AccountsFinalize<'info> for Box<T> {
+impl<'info, B, T: crate::AccountsFinalize<'info, B>> crate::AccountsFinalize<'info, B> for Box<T> {
     fn finalize(
         &self,
         program_id: &Pubkey,
         remaining_accounts: &[AccountInfo<'info>],
         ix_data: &[u8],
+        bumps: &B,
     ) -> Result<()> {
-        T::finalize(self, program_id, remaining_accounts, ix_data)
+        T::finalize(self, program_id, remaining_accounts, ix_data, bumps)
     }
 }
 

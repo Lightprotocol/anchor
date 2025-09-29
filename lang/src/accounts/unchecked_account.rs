@@ -54,7 +54,7 @@ impl<'info> ToAccountInfos<'info> for UncheckedAccount<'info> {
     }
 }
 
-impl<'info> crate::AccountsFinalize<'info> for UncheckedAccount<'info> {
+impl<'info, B> crate::AccountsFinalize<'info, B> for UncheckedAccount<'info> {
     // Uses default implementation
 }
 

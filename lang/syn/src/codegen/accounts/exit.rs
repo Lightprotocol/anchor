@@ -1,11 +1,13 @@
 use crate::accounts_codegen::constraints::OptionalCheckScope;
-use crate::codegen::accounts::{generics, ParsedGenerics};
+use crate::codegen::accounts::{bumps, generics, ParsedGenerics};
 use crate::{AccountField, AccountsStruct, Ty};
 use quote::quote;
+use syn::Expr;
 
 // Generates the `Exit` trait implementation.
 pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
     let name = &accs.ident;
+    let bumps_struct_name = bumps::generate_bumps_name(&accs.ident);
     let ParsedGenerics {
         combined_generics,
         trait_generics,
@@ -70,9 +72,12 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
     for af in &accs.fields {
         if let AccountField::Field(f) = af {
             // Check if this is a CPDA Account
-            // Skip fields with compress_on_init since they're compressed immediately
+            // TODO: add support for compressible flag
             if let Some(cpda) = &f.constraints.cpda {
-                if !cpda.compress_on_init {
+                // if cpda.compressible {
+                //     panic!("CPDA Account fields with compressible flag are not yet supported");
+                // }
+                if cpda.compress_on_init {
                     cpda_fields.push(&f.ident);
                 }
             } else if matches!(&f.ty, Ty::CMint(_)) {
@@ -119,6 +124,49 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                           required_fields.contains_key("compressed_token_program_cpi_authority") &&
                           required_fields.contains_key("compressed_token_program");
     
+    // Generate instruction deserialization for finalize (same as try_accounts)
+    let ix_de = match &accs.instruction_api {
+        None => quote! {},
+        Some(ix_api) => {
+            let strct_inner = &ix_api;
+            // Collect field identifiers from the instruction declaration
+            let field_idents: Vec<proc_macro2::TokenStream> = ix_api
+                .iter()
+                .map(|expr: &Expr| match expr {
+                    Expr::Type(expr_type) => {
+                        let field = &expr_type.expr;
+                        quote! { #field }
+                    }
+                    _ => panic!("Invalid instruction declaration"),
+                })
+                .collect();
+            // Generate re-bindings to move fields out of __args explicitly
+            let field_rebinds: Vec<proc_macro2::TokenStream> = ix_api
+                .iter()
+                .map(|expr: &Expr| match expr {
+                    Expr::Type(expr_type) => {
+                        let field = &expr_type.expr;
+                        quote! { let #field = __args.#field; }
+                    }
+                    _ => panic!("Invalid instruction declaration"),
+                })
+                .collect();
+            quote! {
+                let mut __ix_data = _ix_data;
+                #[derive(anchor_lang::AnchorSerialize, anchor_lang::AnchorDeserialize)]
+                struct __Args {
+                    #strct_inner
+                }
+                let __args: __Args = __Args::deserialize(&mut __ix_data)
+                    .map_err(|_| anchor_lang::error::ErrorCode::InstructionDidNotDeserialize)?;
+                // Move fields out of __args into local variables
+                #(#field_rebinds)*
+                // Prevent unused warning for the holder
+                let _ = __args;
+            }
+        }
+    };
+    
     // Generate the batched finalize for compressed operations
     // Get the payer from the CMint if it exists
     let cmint_payer = cmint_field.and_then(|cmint_ident| {
@@ -157,16 +205,6 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
 
         for (index, ident) in fields_to_process.iter().enumerate() {
             let idx_lit = index as u8;
-            // Build the corresponding address_tree_info identifier from ix args
-            // For now, use a simple mapping - pool_state -> pool, observation_state -> observation
-            let info_name = if ident.to_string().contains("pool") {
-                "pool"
-            } else if ident.to_string().contains("observation") {
-                "observation"
-            } else {
-                &ident.to_string()
-            };
-            let info_ident = format_ident!("{}_address_tree_info", info_name);
 
             // Resolve the account type for generic prepare function
             let acc_ty_path = match accs
@@ -212,22 +250,28 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             // Use prepare_accounts_for_compression_on_init for CPDA fields
             let prepare_fn = quote! { prepare_accounts_for_compression_on_init };
             
-            // Get output_state_tree_index from CPDA constraint or instruction data
-            let output_tree_expr = accs.fields.iter().find_map(|af| {
+            // Get constraint expressions from CPDA including authority
+            let (address_tree_info_expr, proof_expr, output_tree_expr, cpda_authority_expr) = accs.fields.iter().find_map(|af| {
                 if let AccountField::Field(field) = af {
                     if field.ident == **ident {
                         if let Some(cpda) = &field.constraints.cpda {
-                            return cpda.output_state_tree_index.as_ref().map(|e| quote! { #e });
+                            let authority = cpda.authority.as_ref().map(|e| quote! { #e });
+                            return Some((
+                                cpda.address_tree_info.as_ref().map(|e| quote! { #e }).unwrap_or_else(|| panic!("CPDA address_tree_info is required")),
+                                cpda.proof.as_ref().map(|e| quote! { #e }).unwrap_or_else(|| panic!("CPDA proof is required")),
+                                cpda.output_state_tree_index.as_ref().map(|e| quote! { #e }).unwrap_or_else(|| panic!("CPDA output_state_tree_index is required")),
+                                authority
+                            ));
                         }
                     }
                 }
                 None
-            }).unwrap_or_else(|| quote! { 0u8 });
+            }).unwrap_or_else(|| panic!("CPDA constraints not found for account"));
             
             let tree_info_ident = format_ident!("{}_tree_info", ident);
             compress_blocks.push(quote! {
-                // Build new address params for #ident
-                let #tree_info_ident = compression_params.#info_ident.clone();
+                // Build new address params for #ident using constraint expression (move, avoid clone)
+                let #tree_info_ident = #address_tree_info_expr;
                 let #new_addr_params_ident = #tree_info_ident
                     .into_new_address_params_assigned_packed(
                         self.#ident.key().to_bytes(),
@@ -280,6 +324,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 }
                 None
             });
+           
             
             // Build expressions from constraints or fallback to instruction data
             let cmint_proof_expr = cmint_constraints
@@ -319,17 +364,132 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     }
                 });
                 
-            // Get mint bump from constraint
-            let cmint_bump_expr = cmint_constraints
-                .and_then(|c| c.mint_signer_bump.as_ref())
-                .map(|e| quote! { #e })
-                .unwrap_or_else(|| quote! { panic!("CMint mint_signer_bump constraint is required") });
+            // Get the mint_signer field name from the constraint at compile time
+            let mint_signer_bump_expr = cmint_constraints
+                .and_then(|c| c.mint_signer.as_ref())
+                .map(|signer_field| quote! { _bumps.#signer_field })
+                .unwrap_or_else(|| quote! { panic!("mint_signer constraint is required for CMint") });
             
+            // Check if we have compressed PDAs that need authority signing
+            let has_compress_on_init = !fields_to_process.is_empty();
+            
+            // Collect all unique authorities and their seeds
+            // Each CPDA MUST have an explicit authority when using compress_on_init
+            let mut authority_expr = None;
+            
+            // Check that all compress_on_init CPDAs have an explicit authority
+            for ident in fields_to_process.iter() {
+                if let Some(cpda) = accs.fields.iter().find_map(|af| {
+                    if let AccountField::Field(field) = af {
+                        if &field.ident == *ident {
+                            return field.constraints.cpda.as_ref();
+                        }
+                    }
+                    None
+                }) {
+                    if cpda.authority.is_none() {
+                        // Compile-time panic if compress_on_init without authority
+                        panic!(
+                            "CPDA field '{}' has compress_on_init but no cpda::authority constraint. \
+                            All compress_on_init CPDAs must explicitly specify their authority.",
+                            ident
+                        );
+                    }
+                    // Use the first authority we find (they should all be the same in practice)
+                    if authority_expr.is_none() {
+                        authority_expr = cpda.authority.as_ref();
+                    }
+                }
+            }
+            
+            // Build the authority seeds extraction logic
+            let authority_seeds_setup = if let Some(auth_expr) = authority_expr {
+                // The auth_expr is an expression like "authority" 
+                // We need to find the corresponding field and extract its seeds
+                // For now, let's try to match by converting the expression to a string
+                let auth_field = accs.fields.iter().find_map(|af| {
+                    if let AccountField::Field(f) = af {
+                        // Simple heuristic: if the field name matches the start of the expression
+                        // This handles both "authority" and "self.authority" cases
+                        let field_name_str = f.ident.to_string();
+                        let expr_str = quote! { #auth_expr }.to_string();
+                        if expr_str.contains(&field_name_str) {
+                            Some(f)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                
+                if let Some(field) = auth_field {
+                    if let Some(seeds_group) = &field.constraints.seeds {
+                        let seeds = &seeds_group.seeds;
+                        let seed_exprs: Vec<_> = seeds.iter().map(|s| {
+                            quote! { #s.as_ref() }
+                        }).collect();
+                        
+                        quote! {
+                            // Build authority seeds from the authority PDA definition
+                            let auth_bump = _bumps.#auth_expr;
+                            auth_bump_array = [auth_bump];
+                            let mut auth_seeds_for_cpi: Vec<&[u8]> = vec![#(#seed_exprs),*];
+                            auth_seeds_for_cpi.push(&auth_bump_array);
+                        }
+                    } else {
+                        quote! {
+                            panic!("Authority field must be a PDA with seeds when compress_on_init PDAs exist")
+                        }
+                    }
+                } else {
+                    // Fallback: assume it's the standard authority with AUTH_SEED
+                    quote! {
+                        // Build authority seeds (fallback to AUTH_SEED pattern)
+                        let auth_bump = _bumps.#auth_expr;
+                        auth_bump_array = [auth_bump];
+                        let mut auth_seeds_for_cpi: Vec<&[u8]> = vec![crate::AUTH_SEED.as_bytes()];
+                        auth_seeds_for_cpi.push(&auth_bump_array);
+                    }
+                }
+            } else {
+                quote! {
+                    // No compress_on_init PDAs, no authority seeds needed
+                    let auth_seeds_for_cpi: Vec<&[u8]> = vec![];
+                }
+            };
+            
+            // Find the bump for the CMint PDA at runtime
+            // The CMint account is a PDA derived from [b"compressed_mint", mint_signer]
             quote! {
-                // Drain queued CMint actions
+                // Drain queued CMint actions - take ownership to avoid lifetime issues
                 let __mint_actions = self.#cmint_ident.take_actions();
-
                 if !__mint_actions.is_empty() {
+                    // Find the bump for the compressed mint PDA
+                    let compressed_mint_seed = b"compressed_mint";
+                    let mint_signer_key = self.#cmint_ident
+                        .mint_signer
+                        .as_ref()
+                        .map(|a| a.key())
+                        .expect("mint_signer is required for CMint");
+                    
+                    let (expected_mint_address, mint_bump) = anchor_lang::solana_program::pubkey::Pubkey::find_program_address(
+                        &[
+                            compressed_mint_seed.as_ref(),
+                            mint_signer_key.as_ref(),
+                        ],
+                        &self.#compressed_token_program.key(),  // CTOKEN_PROGRAM_ID
+                    );
+                    
+                    // Verify the CMint account address matches the expected PDA
+                    if self.#cmint_ident.key() != expected_mint_address {
+                        panic!(
+                            "CMint address mismatch: expected {:?}, got {:?}",
+                            expected_mint_address,
+                            self.#cmint_ident.key()
+                        );
+                    }
+                    
                     // Get tree indices from constraints
                     let output_state_tree_index = #cmint_output_tree_expr;
                     let __address_tree_info = #cmint_address_tree_info_expr;
@@ -356,21 +516,28 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         Some(#cmint_authority_expr.into()),
                         self.#cmint_ident.key().into(),
                     );
-
                     // Build actions
                     let actions: Vec<light_compressed_token_sdk::instructions::MintActionType> = __mint_actions
                         .iter()
                         .map(|a| light_compressed_token_sdk::instructions::MintActionType::MintToCToken {
-                            account: a.recipient,
+                            account: *a.recipient.key,
                             amount: a.amount,
                         })
                         .collect();
-
                     // Create mint inputs
+
+                    let mint_signer = self.#cmint_ident
+                            .mint_signer
+                            .as_ref()
+                            .map(|a| a.key())
+                            .expect("mint_signer is required for cmint mint_seed");
+
                     let inputs = light_compressed_token_sdk::instructions::CreateMintInputs {
                         compressed_mint_inputs: compressed_mint_with_context,
-                        mint_seed: self.#cmint_ident.key(),
-                        mint_bump: #cmint_bump_expr,
+                        // mint_seed: self.#cmint_ident.key(),
+                        // Use the PDA mint_signer as the mint seed (must sign)
+                        mint_seed: mint_signer,
+                        mint_bump,  // Use the bump we just found from PDA derivation
                         authority: #cmint_authority_expr.into(),
                         payer: #cmint_payer_expr,
                         proof: #cmint_proof_expr.0.map(|p| light_compressed_token_sdk::CompressedProof::from(p)),
@@ -378,7 +545,6 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         output_queue: output_state_queue,
                         actions,
                     };
-
                     // Build instruction
                     let mint_action_instruction: anchor_lang::solana_program::instruction::Instruction =
                         light_compressed_token_sdk::instructions::create_mint_action_cpi(
@@ -390,7 +556,6 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                             )),
                             Some(cpi_accounts.cpi_context().unwrap().key()),
                         ).map_err(|_| anchor_lang::error::ErrorCode::AccountDidNotSerialize)?;
-
                     // Accounts for CPI
                     let mut account_infos = cpi_accounts.to_account_infos();
                     account_infos.extend([
@@ -398,37 +563,91 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         self.#compressed_token_program.to_account_info(),
                         self.authority.to_account_info(),
                     ]);
-                    
                     // Add mint_signer if provided
                     if let Some(mint_signer) = &self.#cmint_ident.mint_signer {
                         account_infos.push(mint_signer.clone());
                     } else {
-                        // If no explicit mint_signer provided, use the CMint account itself
-                        account_infos.push(self.#cmint_ident.to_account_info());
+                       panic!("mint_signer is required");
                     }
                     
                     account_infos.push(self.#fee_payer.to_account_info());
                     
-                    // Recipients will be added from remaining accounts based on mint actions
-
-                    // Signer seeds
-                    let mut signer_seeds: Vec<&[&[u8]]> = Vec::new();
-                    if let (Some(seeds), Some(bump)) = (&self.#cmint_ident.mint_signer_seeds, self.#cmint_ident.mint_signer_bump) {
-                        let mut s: Vec<&[u8]> = seeds.iter().map(|v| v.as_slice()).collect();
-                        s.push(&[bump]);
-                        signer_seeds.push(Box::leak(s.into_boxed_slice()));
+                    // Add recipient accounts from mint actions
+                    // The recipients are now AccountInfo objects, not just keys
+                    for action in __mint_actions.iter() {
+                        let recipient_info = &action.recipient;
+                        let recipient_key = recipient_info.key;
+                        
+                        // Check if this account is already in account_infos (avoid duplicates)
+                        let already_added = account_infos.iter().any(|ai| ai.key == recipient_key);
+                        
+                        if !already_added {
+                            // Clone and add the recipient AccountInfo
+                            account_infos.push(recipient_info.clone());
+                        }
                     }
-                    if let (Some(seeds), Some(bump)) = (&self.#cmint_ident.program_authority_seeds, self.#cmint_ident.program_authority_bump) {
-                        let mut s: Vec<&[u8]> = seeds.iter().map(|v| v.as_slice()).collect();
-                        s.push(&[bump]);
-                        signer_seeds.push(Box::leak(s.into_boxed_slice()));
+                    
+           
+                    // Build signer seeds without heap for outer groups
+                    // Get mint_signer bump from __bumps based on the mint_signer field name
+                    let mint_signer_bump = #mint_signer_bump_expr;
+                    let mint_bump_array = [mint_signer_bump];
+                    let mut mint_signer_seeds_vec: Vec<&[u8]> = Vec::new();
+                    if let Some(seeds) = &self.#cmint_ident.mint_signer_seeds {
+                        for seed in seeds.iter() { mint_signer_seeds_vec.push(seed.as_slice()); }
+                        mint_signer_seeds_vec.push(&mint_bump_array);
                     }
 
-                    anchor_lang::solana_program::program::invoke_signed(
-                        &mint_action_instruction,
-                        &account_infos,
-                        &signer_seeds,
-                    )?;
+
+                    // Build authority seeds for compressed PDA operations
+                    let mut auth_seeds_vec: Vec<&[u8]> = Vec::new();
+                    let has_compress_on_init = #has_compress_on_init;
+                    
+                    // Declare auth_bump_array at this scope so it lives long enough
+                    let auth_bump_array;
+                    
+                    if has_compress_on_init {
+                        // Build authority seeds from the actual PDA definition
+                        #authority_seeds_setup
+                        // Use the authority seeds we built from the actual PDA definition
+                        auth_seeds_vec = auth_seeds_for_cpi;
+                    } else if let Some(seeds) = &self.#cmint_ident.program_authority_seeds {
+                        // Use explicitly provided program_authority_seeds if available
+                        auth_bump_array = [self.#cmint_ident.program_authority_bump.unwrap_or_else(|| panic!("program_authority_bump is required"))];
+                        for seed in seeds.iter() { auth_seeds_vec.push(seed.as_slice()); }
+                        auth_seeds_vec.push(&auth_bump_array);
+                    }
+                    
+                    match (mint_signer_seeds_vec.is_empty(), auth_seeds_vec.is_empty()) {
+                        (false, false) => {
+                            anchor_lang::solana_program::program::invoke_signed(
+                                &mint_action_instruction,
+                                &account_infos,
+                                &[mint_signer_seeds_vec.as_slice(), auth_seeds_vec.as_slice()],
+                            )?;
+                        }
+                        (false, true) => {
+                            anchor_lang::solana_program::program::invoke_signed(
+                                &mint_action_instruction,
+                                &account_infos,
+                                &[mint_signer_seeds_vec.as_slice()],
+                            )?;
+                        }
+                        (true, false) => {
+                            anchor_lang::solana_program::program::invoke_signed(
+                                &mint_action_instruction,
+                                &account_infos,
+                                &[auth_seeds_vec.as_slice()],
+                            )?;
+                        }
+                        (true, true) => {
+                            anchor_lang::solana_program::program::invoke_signed(
+                                &mint_action_instruction,
+                                &account_infos,
+                                &[],
+                            )?;
+                        }
+                    }
                 }
             }
         } else {
@@ -439,8 +658,13 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         quote! {
             // Compressed accounts finalization
             {
+                // Deserialize instruction args to access compression params
+                // This is the same pattern as try_accounts uses
+                #ix_de
+                
+                // Now we can access compression_params and other instruction args by name!
 
-                // Build CPI accounts with CPI context signer
+                // Build CPI accounts with CPI context signer (no clone)
                 let cpi_accounts = light_sdk::cpi::CpiAccountsSmall::new_with_config(
                     &self.#fee_payer,
                     _remaining,
@@ -451,28 +675,8 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 let compression_config_data = light_sdk::compressible::CompressibleConfig::load_checked(&self.#compression_config, &crate::ID)?;
                 let address_space = compression_config_data.address_space;
 
-                // Parse compression params from ix_data
-                // Skip discriminator (8 bytes) and other instruction arguments
-                let compression_params = {
-                    let mut ix_data_cursor = if _ix_data.len() >= 8 {
-                        &_ix_data[8..]
-                    } else {
-                        _ix_data
-                    };
-                    
-                    // Skip other instruction arguments (init_amount_0: u64, init_amount_1: u64, open_time: u64)
-                    // Each u64 is 8 bytes, so skip 24 bytes total
-                    if ix_data_cursor.len() >= 24 {
-                        ix_data_cursor = &ix_data_cursor[24..];
-                    }
-                    
-                    // Now deserialize InitializeCompressionParams
-                    InitializeCompressionParams::deserialize(&mut ix_data_cursor)
-                        .map_err(|_| anchor_lang::error::ErrorCode::InstructionDidNotDeserialize)?
-                };
-
-                // Collect compressed infos for all compressible accounts
-                let mut all_compressed_infos = Vec::new();
+                // Collect compressed infos for all compressible accounts (pre-allocate)
+                let mut all_compressed_infos = Vec::with_capacity(#compressible_count as usize);
                 #(#compress_blocks)*
 
                 // Invoke ONE system-program batched CPI for all CPDAs
@@ -550,7 +754,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         quote! {}
                     }
                     _ => quote! {
-                        anchor_lang::AccountsFinalize::finalize(&self.#ident, program_id, _remaining, _ix_data)
+                        anchor_lang::AccountsFinalize::finalize(&self.#ident, program_id, _remaining, _ix_data, _bumps)
                             .map_err(|e| e.with_account_name(#name_str))?;
                     },
                 }
@@ -559,12 +763,13 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         .collect();
     quote! {
         #[automatically_derived]
-        impl<#combined_generics> anchor_lang::AccountsFinalize<#trait_generics> for #name<#struct_generics> #where_clause{
+        impl<#combined_generics> anchor_lang::AccountsFinalize<#trait_generics, #bumps_struct_name> for #name<#struct_generics> #where_clause{
             fn finalize(
                 &self,
                 program_id: &anchor_lang::solana_program::pubkey::Pubkey,
                 _remaining: &[anchor_lang::solana_program::account_info::AccountInfo<#trait_generics>],
                 _ix_data: &[u8],
+                _bumps: &#bumps_struct_name,
             ) -> anchor_lang::Result<()> {
                 // Finalize all nested/composite fields first, then each field.
                 #(#on_finalize)*

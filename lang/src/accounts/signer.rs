@@ -91,7 +91,7 @@ impl<'info> ToAccountInfos<'info> for Signer<'info> {
     }
 }
 
-impl<'info> crate::AccountsFinalize<'info> for Signer<'info> {
+impl<'info, B> crate::AccountsFinalize<'info, B> for Signer<'info> {
     // Uses default implementation
 }
 

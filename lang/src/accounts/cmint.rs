@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 #[derive(Clone)]
-pub struct MintAction {
-    pub recipient: Pubkey,
+pub struct MintAction<'info> {
+    pub recipient: AccountInfo<'info>,
     pub amount: u64,
 }
 
@@ -17,7 +17,7 @@ pub struct MintAction {
 /// It queues mint actions to be executed in a single batched invoke at finalize.
 pub struct CMint<'info> {
     info: AccountInfo<'info>,
-    actions: RefCell<Vec<MintAction>>,
+    actions: RefCell<Vec<MintAction<'info>>>,
     // Constraints from account macro
     pub authority: Option<Pubkey>,
     pub decimals: Option<u8>,
@@ -29,15 +29,15 @@ pub struct CMint<'info> {
 }
 
 impl<'info> CMint<'info> {
-    pub fn mint_to(&self, recipient: &Pubkey, amount: u64) -> crate::Result<()> {
+    pub fn mint_to(&self, recipient: &AccountInfo<'info>, amount: u64) -> crate::Result<()> {
         self.actions.borrow_mut().push(MintAction {
-            recipient: *recipient,
+            recipient: recipient.clone(),
             amount,
         });
         Ok(())
     }
 
-    pub fn take_actions(&self) -> Vec<MintAction> {
+    pub fn take_actions(&self) -> Vec<MintAction<'info>> {
         let mut b = self.actions.borrow_mut();
         let actions = b.clone();
         b.clear();
@@ -98,4 +98,4 @@ impl<'info, T> Accounts<'info, T> for CMint<'info> {
 }
 
 // Note: the outer Accounts struct finalize will consume actions and perform the batched CPI.
-impl<'info> AccountsFinalize<'info> for CMint<'info> {}
+impl<'info, B> AccountsFinalize<'info, B> for CMint<'info> {}

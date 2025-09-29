@@ -174,7 +174,7 @@ impl<'info, T> ToAccountInfos<'info> for Program<'info, T> {
     }
 }
 
-impl<'info, T> crate::AccountsFinalize<'info> for Program<'info, T> {
+impl<'info, B, T> crate::AccountsFinalize<'info, B> for Program<'info, T> {
     // Uses default implementation
 }
 

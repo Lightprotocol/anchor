@@ -283,7 +283,7 @@ impl<'info, T: ZeroCopy + Owner> ToAccountInfos<'info> for AccountLoader<'info, 
     }
 }
 
-impl<'info, T: ZeroCopy + Owner> crate::AccountsFinalize<'info> for AccountLoader<'info, T> {
+impl<'info, B, T: ZeroCopy + Owner> crate::AccountsFinalize<'info, B> for AccountLoader<'info, T> {
     // Uses default implementation
 }
 

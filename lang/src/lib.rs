@@ -135,15 +135,17 @@ pub trait Accounts<'info, B>: ToAccountMetas + ToAccountInfos<'info> + Sized {
 /// A finalize procedure hook that runs after the user handler and before exit.
 /// Programs or account wrapper types can optionally implement this to perform
 /// deferred operations that must happen at the end of the instruction.
-pub trait AccountsFinalize<'info>: ToAccountMetas + ToAccountInfos<'info> {
+pub trait AccountsFinalize<'info, B>: ToAccountMetas + ToAccountInfos<'info> {
     /// `program_id` is the currently executing program.
     /// `remaining_accounts` are the accounts not deserialized into the `Accounts` struct.
     /// `ix_data` is the raw instruction data for the handler.
+    /// `bumps` contains the PDA bumps calculated during account validation.
     fn finalize(
         &self,
         _program_id: &Pubkey,
         _remaining_accounts: &[AccountInfo<'info>],
         _ix_data: &[u8],
+        _bumps: &B,
     ) -> Result<()> {
         // no-op by default
         Ok(())

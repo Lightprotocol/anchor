@@ -319,7 +319,7 @@ where
     }
 }
 
-impl<'info, T> crate::AccountsFinalize<'info> for LazyAccount<'info, T>
+impl<'info, B, T> crate::AccountsFinalize<'info, B> for LazyAccount<'info, T>
 where
     T: AccountSerialize + Discriminator + Owner + Clone,
 {

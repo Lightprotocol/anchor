@@ -62,15 +62,16 @@ impl<'info, T: ToAccountInfos<'info>> ToAccountInfos<'info> for Option<T> {
     }
 }
 
-impl<'info, T: crate::AccountsFinalize<'info>> crate::AccountsFinalize<'info> for Option<T> {
+impl<'info, B, T: crate::AccountsFinalize<'info, B>> crate::AccountsFinalize<'info, B> for Option<T> {
     fn finalize(
         &self,
         program_id: &Pubkey,
         remaining_accounts: &[AccountInfo<'info>],
         ix_data: &[u8],
+        bumps: &B,
     ) -> Result<()> {
         if let Some(account) = self {
-            account.finalize(program_id, remaining_accounts, ix_data)?;
+            account.finalize(program_id, remaining_accounts, ix_data, bumps)?;
         }
         Ok(())
     }

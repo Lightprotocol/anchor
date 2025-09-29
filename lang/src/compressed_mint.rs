@@ -75,8 +75,8 @@ pub fn finalize_compressed_batch<'info>(
     use light_sdk_types::CpiAccountsConfig;
 
     // Constants from the user's program
-    const POOL_LP_MINT_SEED: &[u8] = b"pool_lp_mint";
-    const AUTH_SEED: &[u8] = b"amm_authority";
+    // const POOL_LP_MINT_SEED: &[u8] = b"pool_lp_mint";
+    // const AUTH_SEED: &[u8] = b"amm_authority";
 
     // Parse compression params from instruction data
     // Expected structure: InitializeCompressionParams at end of ix_data

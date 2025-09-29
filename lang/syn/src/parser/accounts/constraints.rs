@@ -313,6 +313,12 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                     .unwrap_or_else(|| ident.span());
 
                 match kw.as_str() {
+                    "authority" => ConstraintToken::CPDAAuthority(Context::new(
+                        span,
+                        ConstraintCPDAAuthority {
+                            authority: stream.parse()?,
+                        },
+                    )),
                     "address_tree_info" => ConstraintToken::CPDAAddressTreeInfo(Context::new(
                         span,
                         ConstraintCPDAAddressTreeInfo {
@@ -698,6 +704,7 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub cmint_proof: Option<Context<ConstraintCMintProof>>,
     pub cmint_output_state_tree_index: Option<Context<ConstraintCMintOutputStateTreeIndex>>,
     // CPDA constraints
+    pub cpda_authority: Option<Context<ConstraintCPDAAuthority>>,
     pub cpda_address_tree_info: Option<Context<ConstraintCPDAAddressTreeInfo>>,
     pub cpda_proof: Option<Context<ConstraintCPDAProof>>,
     pub cpda_output_state_tree_index: Option<Context<ConstraintCPDAOutputStateTreeIndex>>,
@@ -759,6 +766,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cmint_address_tree_info: None,
             cmint_proof: None,
             cmint_output_state_tree_index: None,
+            cpda_authority: None,
             cpda_address_tree_info: None,
             cpda_proof: None,
             cpda_output_state_tree_index: None,
@@ -999,6 +1007,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cmint_address_tree_info,
             cmint_proof,
             cmint_output_state_tree_index,
+            cpda_authority,
             cpda_address_tree_info,
             cpda_proof,
             cpda_output_state_tree_index,
@@ -1262,10 +1271,11 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             } else {
                 None
             },
-            cpda: if cpda_address_tree_info.is_some() || cpda_proof.is_some() || 
+            cpda: if cpda_authority.is_some() || cpda_address_tree_info.is_some() || cpda_proof.is_some() || 
                      cpda_output_state_tree_index.is_some() || cpda_compress_on_init.is_some() {
                 Some(ConstraintCPDAGroup {
                     compress_on_init: cpda_compress_on_init.is_some(),
+                    authority: cpda_authority.map(|c| c.into_inner().authority),
                     address_tree_info: cpda_address_tree_info.map(|c| c.into_inner().address_tree_info),
                     proof: cpda_proof.map(|c| c.into_inner().proof),
                     output_state_tree_index: cpda_output_state_tree_index.map(|c| c.into_inner().output_state_tree_index),
@@ -1347,6 +1357,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ConstraintToken::CMintAddressTreeInfo(c) => self.add_cmint_address_tree_info(c),
             ConstraintToken::CMintProof(c) => self.add_cmint_proof(c),
             ConstraintToken::CMintOutputStateTreeIndex(c) => self.add_cmint_output_state_tree_index(c),
+            ConstraintToken::CPDAAuthority(c) => self.add_cpda_authority(c),
             ConstraintToken::CPDAAddressTreeInfo(c) => self.add_cpda_address_tree_info(c),
             ConstraintToken::CPDAProof(c) => self.add_cpda_proof(c),
             ConstraintToken::CPDAOutputStateTreeIndex(c) => self.add_cpda_output_state_tree_index(c),
@@ -1797,6 +1808,14 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             return Err(ParseError::new(c.span(), "cmint output_state_tree_index already provided"));
         }
         self.cmint_output_state_tree_index.replace(c);
+        Ok(())
+    }
+
+    fn add_cpda_authority(&mut self, c: Context<ConstraintCPDAAuthority>) -> ParseResult<()> {
+        if self.cpda_authority.is_some() {
+            return Err(ParseError::new(c.span(), "cpda authority already provided"));
+        }
+        self.cpda_authority.replace(c);
         Ok(())
     }
 
