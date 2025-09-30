@@ -3,7 +3,16 @@ use syn::parse::{Error as ParseError, Result as ParseResult};
 use syn::{bracketed, Token};
 
 pub fn parse(f: &syn::Field, f_ty: Option<&Ty>) -> ParseResult<ConstraintGroup> {
+    parse_with_instruction(f, f_ty, &None)
+}
+
+pub fn parse_with_instruction(
+    f: &syn::Field,
+    f_ty: Option<&Ty>,
+    instruction_api: &Option<Punctuated<Expr, Comma>>,
+) -> ParseResult<ConstraintGroup> {
     let mut constraints = ConstraintGroupBuilder::new(f_ty);
+    constraints.set_instruction_api(instruction_api.clone());
     for attr in f.attrs.iter().filter(is_account) {
         for c in attr.parse_args_with(Punctuated::<ConstraintToken, Comma>::parse_terminated)? {
             constraints.add(c)?;
@@ -371,6 +380,18 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                                 authority: stream.parse()?,
                             },
                         )),
+                        "mint_authority" => ConstraintToken::CMintMintAuthority(Context::new(
+                            span,
+                            ConstraintCMintMintAuthority {
+                                mint_authority: stream.parse()?,
+                            },
+                        )),
+                        "freeze_authority" => ConstraintToken::CMintFreezeAuthority(Context::new(
+                            span,
+                            ConstraintCMintFreezeAuthority {
+                                freeze_authority: stream.parse()?,
+                            },
+                        )),
                         "payer" => ConstraintToken::CMintPayer(Context::new(
                             span,
                             ConstraintCMintPayer {
@@ -648,6 +669,7 @@ fn parse_optional_custom_error(stream: &ParseStream) -> ParseResult<Option<Expr>
 #[derive(Default)]
 pub struct ConstraintGroupBuilder<'ty> {
     pub f_ty: Option<&'ty Ty>,
+    pub instruction_api: Option<Punctuated<Expr, Comma>>,
     pub init: Option<Context<ConstraintInit>>,
     pub zeroed: Option<Context<ConstraintZeroed>>,
     pub mutable: Option<Context<ConstraintMut>>,
@@ -693,6 +715,8 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub realloc_zero: Option<Context<ConstraintReallocZero>>,
     // CMint constraints
     pub cmint_authority: Option<Context<ConstraintCMintAuthority>>,
+    pub cmint_mint_authority: Option<Context<ConstraintCMintMintAuthority>>,
+    pub cmint_freeze_authority: Option<Context<ConstraintCMintFreezeAuthority>>,
     pub cmint_payer: Option<Context<ConstraintCMintPayer>>,
     pub cmint_decimals: Option<Context<ConstraintCMintDecimals>>,
     pub cmint_signer: Option<Context<ConstraintCMintSigner>>,
@@ -715,6 +739,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
     pub fn new(f_ty: Option<&'ty Ty>) -> Self {
         Self {
             f_ty,
+            instruction_api: None,
             init: None,
             zeroed: None,
             mutable: None,
@@ -756,6 +781,8 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc_payer: None,
             realloc_zero: None,
             cmint_authority: None,
+            cmint_mint_authority: None,
+            cmint_freeze_authority: None,
             cmint_payer: None,
             cmint_decimals: None,
             cmint_signer: None,
@@ -772,6 +799,202 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cpda_output_state_tree_index: None,
             cpda_compress_on_init: None,
         }
+    }
+    
+    pub fn set_instruction_api(&mut self, instruction_api: Option<Punctuated<Expr, Comma>>) {
+        self.instruction_api = instruction_api;
+    }
+    
+    fn auto_detect_compression_fields(&mut self) -> ParseResult<()> {
+        // Only auto-detect if instruction data is available
+        let instruction_api = match &self.instruction_api {
+            Some(api) => api,
+            None => return Ok(()),
+        };
+        
+        // Helper to find a field in instruction parameters that contains a specific nested field
+        let find_field_with_nested = |nested_field_name: &str| -> Option<(String, String)> {
+            for expr in instruction_api.iter() {
+                if let Expr::Type(expr_type) = expr {
+                    let field_str = quote::quote! { #expr_type }.to_string();
+                    // Parse pattern like "compression_params : InitializeCompressionParams"
+                    let parts: Vec<&str> = field_str.split(" : ").collect();
+                    if parts.len() == 2 {
+                        let param_name = parts[0].trim();
+                        // Check if this could be a struct containing our nested field
+                        // We look for common patterns in the type name
+                        let type_name = parts[1].trim();
+                        if type_name.contains("Compression") || type_name.contains("Params") {
+                            // Found a potential compression params struct
+                            return Some((param_name.to_string(), nested_field_name.to_string()));
+                        }
+                    }
+                }
+            }
+            None
+        };
+        
+        // Helper to find ValidityProof field directly - returns Result to handle multiple proofs
+        let find_validity_proof_field = || -> ParseResult<Option<String>> {
+            let mut found_proofs = Vec::new();
+            
+            // First, look for direct ValidityProof fields
+            for expr in instruction_api.iter() {
+                if let Expr::Type(expr_type) = expr {
+                    let field_str = quote::quote! { #expr_type }.to_string();
+                    let parts: Vec<&str> = field_str.split(" : ").collect();
+                    if parts.len() == 2 {
+                        let param_name = parts[0].trim();
+                        let type_name = parts[1].trim();
+                        // Check if this is a ValidityProof type
+                        if type_name == "ValidityProof" || type_name.ends_with("::ValidityProof") {
+                            found_proofs.push(param_name.to_string());
+                        }
+                    }
+                }
+            }
+            
+            // If no direct ValidityProof, look for it in a compression params struct
+            if found_proofs.is_empty() {
+                if let Some((param, field)) = find_field_with_nested("proof") {
+                    found_proofs.push(format!("{}.{}", param, field));
+                }
+            }
+            
+            // Check for ambiguity
+            match found_proofs.len() {
+                0 => Ok(None),
+                1 => Ok(Some(found_proofs[0].clone())),
+                _ => {
+                    // Multiple proofs found - require explicit specification
+                    Err(ParseError::new(
+                        proc_macro2::Span::call_site(),
+                        format!(
+                            "Multiple ValidityProof fields found in instruction parameters: {}. \
+                            Please explicitly specify the proof constraint (e.g., cpda::proof = compression_params.proof)",
+                            found_proofs.join(", ")
+                        )
+                    ))
+                }
+            }
+        };
+        
+        // Auto-detect for CPDA constraints if we have CPDA fields but missing some
+        let has_cpda = self.cpda_authority.is_some() || 
+                       self.cpda_address_tree_info.is_some() ||
+                       self.cpda_output_state_tree_index.is_some() ||
+                       self.cpda_compress_on_init.is_some();
+                       
+        if has_cpda {
+            // Auto-detect proof if not explicitly set
+            if self.cpda_proof.is_none() {
+                match find_validity_proof_field()? {
+                    Some(proof_field) => {
+                        let proof_expr: Expr = syn::parse_str(&proof_field)
+                            .map_err(|_| ParseError::new(
+                                proc_macro2::Span::call_site(),
+                                format!("Failed to parse auto-detected proof field: {}", proof_field)
+                            ))?;
+                        self.cpda_proof = Some(Context::new(
+                            proc_macro2::Span::call_site(),
+                            ConstraintCPDAProof { proof: proof_expr }
+                        ));
+                    }
+                    None => {
+                        // No proof found - this is an error for CPDA
+                        return Err(ParseError::new(
+                            proc_macro2::Span::call_site(),
+                            "CPDA constraints require a proof field. Either add 'cpda::proof = <expr>' \
+                            or ensure your instruction has a ValidityProof parameter."
+                        ));
+                    }
+                }
+            }
+            
+            // Default output_state_tree_index to 0 if not explicitly set
+            if self.cpda_output_state_tree_index.is_none() {
+                let default_index: Expr = syn::parse_str("0")
+                    .expect("Failed to parse default output_state_tree_index");
+                self.cpda_output_state_tree_index = Some(Context::new(
+                    proc_macro2::Span::call_site(),
+                    ConstraintCPDAOutputStateTreeIndex { output_state_tree_index: default_index }
+                ));
+            }
+            
+            // Auto-detect other fields if patterns are found
+            // Look for fields that match common patterns
+            for expr in instruction_api.iter() {
+                if let Expr::Type(expr_type) = expr {
+                    let field_str = quote::quote! { #expr_type }.to_string();
+                    let parts: Vec<&str> = field_str.split(" : ").collect();
+                    if parts.len() == 2 {
+                        let param_name = parts[0].trim();
+                        let type_name = parts[1].trim();
+                        
+                        // Auto-detect address_tree_info
+                        if self.cpda_address_tree_info.is_none() && 
+                           (type_name.contains("AddressTreeInfo") || type_name.contains("PackedAddressTreeInfo")) {
+                            let field_expr: Expr = syn::parse_str(param_name)
+                                .map_err(|_| ParseError::new(
+                                    proc_macro2::Span::call_site(),
+                                    format!("Failed to parse auto-detected address_tree_info: {}", param_name)
+                                ))?;
+                            self.cpda_address_tree_info = Some(Context::new(
+                                proc_macro2::Span::call_site(),
+                                ConstraintCPDAAddressTreeInfo { address_tree_info: field_expr }
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Similar auto-detection for CMint constraints
+        let has_cmint = self.cmint_authority.is_some() ||
+                        self.cmint_payer.is_some() ||
+                        self.cmint_decimals.is_some() ||
+                        self.cmint_signer.is_some() ||
+                        self.cmint_address_tree_info.is_some() ||
+                        self.cmint_output_state_tree_index.is_some();
+                        
+        if has_cmint {
+            // Auto-detect proof if not explicitly set
+            if self.cmint_proof.is_none() {
+                match find_validity_proof_field()? {
+                    Some(proof_field) => {
+                        let proof_expr: Expr = syn::parse_str(&proof_field)
+                            .map_err(|_| ParseError::new(
+                                proc_macro2::Span::call_site(),
+                                format!("Failed to parse auto-detected proof field for CMint: {}", proof_field)
+                            ))?;
+                        self.cmint_proof = Some(Context::new(
+                            proc_macro2::Span::call_site(),
+                            ConstraintCMintProof { proof: proof_expr }
+                        ));
+                    }
+                    None => {
+                        // No proof found - this is an error for CMint
+                        return Err(ParseError::new(
+                            proc_macro2::Span::call_site(),
+                            "CMint constraints require a proof field. Either add 'cmint::proof = <expr>' \
+                            or ensure your instruction has a ValidityProof parameter."
+                        ));
+                    }
+                }
+            }
+            
+            // Default output_state_tree_index to 0 if not explicitly set
+            if self.cmint_output_state_tree_index.is_none() {
+                let default_index: Expr = syn::parse_str("0")
+                    .expect("Failed to parse default output_state_tree_index");
+                self.cmint_output_state_tree_index = Some(Context::new(
+                    proc_macro2::Span::call_site(),
+                    ConstraintCMintOutputStateTreeIndex { output_state_tree_index: default_index }
+                ));
+            }
+        }
+        
+        Ok(())
     }
 
     pub fn build(mut self) -> ParseResult<ConstraintGroup> {
@@ -954,8 +1177,12 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             }
         }
 
+        // Auto-detect compression fields from instruction data if not explicitly provided
+        self.auto_detect_compression_fields()?;
+        
         let ConstraintGroupBuilder {
             f_ty: _,
+            instruction_api: _,
             init,
             zeroed,
             mutable,
@@ -997,6 +1224,8 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc_payer,
             realloc_zero,
             cmint_authority,
+            cmint_mint_authority,
+            cmint_freeze_authority,
             cmint_payer,
             cmint_decimals,
             cmint_signer,
@@ -1249,7 +1478,8 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             seeds,
             token_account: if !is_init {token_account} else {None},
             mint: if !is_init {mint} else {None},
-            cmint: if cmint_authority.is_some() || cmint_payer.is_some() || cmint_decimals.is_some() || 
+            cmint: if cmint_authority.is_some() || cmint_mint_authority.is_some() || 
+                       cmint_freeze_authority.is_some() || cmint_payer.is_some() || cmint_decimals.is_some() || 
                        cmint_signer.is_some() || cmint_signer_seeds.is_some() || 
                        cmint_signer_bump.is_some() ||
                        cmint_program_authority_seeds.is_some() || cmint_program_authority_bump.is_some() ||
@@ -1257,6 +1487,8 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                        cmint_output_state_tree_index.is_some() {
                 Some(ConstraintCMintGroup {
                     authority: cmint_authority.map(|c| c.into_inner().authority),
+                    mint_authority: cmint_mint_authority.map(|c| c.into_inner().mint_authority),
+                    freeze_authority: cmint_freeze_authority.map(|c| c.into_inner().freeze_authority),
                     decimals: cmint_decimals.map(|c| c.into_inner().decimals),
                     payer: cmint_payer.map(|c| c.into_inner().payer),
                     mint_signer: cmint_signer.map(|c| c.into_inner().signer),
@@ -1347,6 +1579,8 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                 self.add_extension_permanent_delegate(c)
             }
             ConstraintToken::CMintAuthority(c) => self.add_cmint_authority(c),
+            ConstraintToken::CMintMintAuthority(c) => self.add_cmint_mint_authority(c),
+            ConstraintToken::CMintFreezeAuthority(c) => self.add_cmint_freeze_authority(c),
             ConstraintToken::CMintPayer(c) => self.add_cmint_payer(c),
             ConstraintToken::CMintDecimals(c) => self.add_cmint_decimals(c),
             ConstraintToken::CMintSigner(c) => self.add_cmint_signer(c),
@@ -1728,6 +1962,22 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             return Err(ParseError::new(c.span(), "cmint authority already provided"));
         }
         self.cmint_authority.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_mint_authority(&mut self, c: Context<ConstraintCMintMintAuthority>) -> ParseResult<()> {
+        if self.cmint_mint_authority.is_some() {
+            return Err(ParseError::new(c.span(), "cmint mint_authority already provided"));
+        }
+        self.cmint_mint_authority.replace(c);
+        Ok(())
+    }
+
+    fn add_cmint_freeze_authority(&mut self, c: Context<ConstraintCMintFreezeAuthority>) -> ParseResult<()> {
+        if self.cmint_freeze_authority.is_some() {
+            return Err(ParseError::new(c.span(), "cmint freeze_authority already provided"));
+        }
+        self.cmint_freeze_authority.replace(c);
         Ok(())
     }
 

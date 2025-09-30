@@ -39,7 +39,7 @@ pub fn parse(accounts_struct: &syn::ItemStruct) -> ParseResult<AccountsStruct> {
         syn::Fields::Named(fields) => fields
             .named
             .iter()
-            .map(parse_account_field)
+            .map(|f| parse_account_field_with_instruction(f, &instruction_api))
             .collect::<ParseResult<Vec<AccountField>>>()?,
         _ => {
             return Err(ParseError::new_spanned(
@@ -291,12 +291,20 @@ fn constraints_cross_checks(fields: &[AccountField]) -> ParseResult<()> {
 }
 
 pub fn parse_account_field(f: &syn::Field) -> ParseResult<AccountField> {
+    parse_account_field_with_instruction(f, &None)
+}
+
+pub fn parse_account_field_with_instruction(
+    f: &syn::Field,
+    instruction_api: &Option<Punctuated<Expr, Comma>>,
+) -> ParseResult<AccountField> {
     let ident = f.ident.clone().unwrap();
     let docs = docs::parse(&f.attrs);
     let account_field = match is_field_primitive(f)? {
         true => {
             let (ty, is_optional) = parse_ty(f)?;
-            let account_constraints = constraints::parse(f, Some(&ty))?;
+            let account_constraints =
+                constraints::parse_with_instruction(f, Some(&ty), instruction_api)?;
             AccountField::Field(Field {
                 ident,
                 ty,
@@ -313,7 +321,8 @@ pub fn parse_account_field(f: &syn::Field) -> ParseResult<AccountField> {
                     "Cannot have Optional composite accounts",
                 ));
             }
-            let account_constraints = constraints::parse(f, None)?;
+            let account_constraints =
+                constraints::parse_with_instruction(f, None, instruction_api)?;
             AccountField::CompositeField(CompositeField {
                 ident,
                 constraints: account_constraints,

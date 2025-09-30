@@ -806,6 +806,8 @@ pub enum ConstraintToken {
     ExtensionPermanentDelegate(Context<ConstraintExtensionPermanentDelegate>),
     // CMint constraints
     CMintAuthority(Context<ConstraintCMintAuthority>),
+    CMintMintAuthority(Context<ConstraintCMintMintAuthority>),
+    CMintFreezeAuthority(Context<ConstraintCMintFreezeAuthority>),
     CMintPayer(Context<ConstraintCMintPayer>),
     CMintDecimals(Context<ConstraintCMintDecimals>),
     CMintSigner(Context<ConstraintCMintSigner>),
@@ -1097,6 +1099,16 @@ pub struct ConstraintCMintAuthority {
 }
 
 #[derive(Debug, Clone)]
+pub struct ConstraintCMintMintAuthority {
+    pub mint_authority: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCMintFreezeAuthority {
+    pub freeze_authority: Expr,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConstraintCMintPayer {
     pub payer: Expr,
 }
@@ -1136,11 +1148,16 @@ pub struct ConstraintCMintAddressTreeInfo {
     pub address_tree_info: Expr,
 }
 
+/// CMint proof constraint.
+/// Auto-detected from instruction parameters if not explicitly specified.
+/// Fails at compile time if multiple proofs exist and none specified.
 #[derive(Debug, Clone)]
 pub struct ConstraintCMintProof {
     pub proof: Expr,
 }
 
+/// CMint output state tree index constraint.
+/// Defaults to 0 if not explicitly specified.
 #[derive(Debug, Clone)]
 pub struct ConstraintCMintOutputStateTreeIndex {
     pub output_state_tree_index: Expr,
@@ -1149,6 +1166,8 @@ pub struct ConstraintCMintOutputStateTreeIndex {
 #[derive(Debug, Clone)]
 pub struct ConstraintCMintGroup {
     pub authority: Option<Expr>,
+    pub mint_authority: Option<Expr>,  // Optional mint authority, defaults to authority
+    pub freeze_authority: Option<Expr>, // Optional freeze authority, defaults to authority
     pub decimals: Option<u8>,
     pub payer: Option<Expr>,
     pub mint_signer: Option<Expr>,
@@ -1180,11 +1199,16 @@ pub struct ConstraintCPDAAddressTreeInfo {
     pub address_tree_info: Expr,
 }
 
+/// CPDA proof constraint.
+/// Auto-detected from instruction parameters if not explicitly specified.
+/// Fails at compile time if multiple proofs exist and none specified.
 #[derive(Debug, Clone)]
 pub struct ConstraintCPDAProof {
     pub proof: Expr,
 }
 
+/// CPDA output state tree index constraint.
+/// Defaults to 0 if not explicitly specified.
 #[derive(Debug, Clone)]
 pub struct ConstraintCPDAOutputStateTreeIndex {
     pub output_state_tree_index: Expr,

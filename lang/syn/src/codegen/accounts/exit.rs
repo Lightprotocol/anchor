@@ -66,19 +66,21 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         .collect();
 
     // Scan for CPDA Account fields and CMints to assign indices
-    let mut cpda_fields = Vec::new();
+    // Separate CPDA fields by whether they have compress_on_init or not
+    let mut cpda_compress_on_init_fields = Vec::new();
+    let mut cpda_empty_fields = Vec::new();
     let mut cmint_field = None;
     
     for af in &accs.fields {
         if let AccountField::Field(f) = af {
             // Check if this is a CPDA Account
-            // TODO: add support for compressible flag
             if let Some(cpda) = &f.constraints.cpda {
-                // if cpda.compressible {
-                //     panic!("CPDA Account fields with compressible flag are not yet supported");
-                // }
                 if cpda.compress_on_init {
-                    cpda_fields.push(&f.ident);
+                    // Will use prepare_accounts_for_compression_on_init
+                    cpda_compress_on_init_fields.push(&f.ident);
+                } else {
+                    // Default: will use prepare_empty_compressed_accounts_on_init
+                    cpda_empty_fields.push(&f.ident);
                 }
             } else if matches!(&f.ty, Ty::CMint(_)) {
                 if cmint_field.is_none() {
@@ -88,8 +90,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         }
     }
     
-    // Use CPDA fields for processing
-    let fields_to_process = &cpda_fields;
+    // Combine both for total count and processing
+    let mut all_cpda_fields = Vec::new();
+    all_cpda_fields.extend(&cpda_compress_on_init_fields);
+    all_cpda_fields.extend(&cpda_empty_fields);
     
     // Find the first Signer field to use as fee payer
     let fee_payer_ident = accs.fields.iter().find_map(|af| {
@@ -183,7 +187,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         })
     });
     
-    let compressed_finalize = if (!fields_to_process.is_empty() || cmint_field.is_some()) 
+    let compressed_finalize = if (!all_cpda_fields.is_empty() || cmint_field.is_some()) 
         && (cmint_payer.is_some() || fee_payer_ident.is_some())
         && has_all_required {
         use quote::format_ident;
@@ -203,7 +207,8 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         let mut compress_blocks: Vec<proc_macro2::TokenStream> = Vec::new();
         let mut new_address_params_idents: Vec<proc_macro2::TokenStream> = Vec::new();
 
-        for (index, ident) in fields_to_process.iter().enumerate() {
+        // Process all CPDA fields (both compress_on_init and empty)
+        for (index, ident) in all_cpda_fields.iter().enumerate() {
             let idx_lit = index as u8;
 
             // Resolve the account type for generic prepare function
@@ -247,8 +252,13 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             let compressed_infos_ident = format_ident!("{}_compressed_infos", ident);
             new_address_params_idents.push(quote! { #new_addr_params_ident });
 
-            // Use prepare_accounts_for_compression_on_init for CPDA fields
-            let prepare_fn = quote! { prepare_accounts_for_compression_on_init };
+            // Choose prepare function based on compress_on_init flag
+            let is_compress_on_init = cpda_compress_on_init_fields.contains(ident);
+            let prepare_fn = if is_compress_on_init {
+                quote! { prepare_accounts_for_compression_on_init }
+            } else {
+                quote! { prepare_empty_compressed_accounts_on_init }
+            };
             
             // Get constraint expressions from CPDA including authority
             let (address_tree_info_expr, proof_expr, output_tree_expr, cpda_authority_expr) = accs.fields.iter().find_map(|af| {
@@ -297,14 +307,12 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     &[#new_addr_params_ident],
                     &[#output_tree_expr],
                     &cpi_accounts,
-                    &address_space,
-                    &self.rent_recipient,
                 )?;
                 all_compressed_infos.extend(#compressed_infos_ident);
             });
         }
 
-        let compressible_count = fields_to_process.len() as u8;
+        let compressible_count = all_cpda_fields.len() as u8;
         let cmint_index = if cmint_field.is_some() {
             quote! { Some(#compressible_count) }
         } else {
@@ -326,7 +334,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             });
            
             
-            // Build expressions from constraints or fallback to instruction data
+            // Build expressions from constraints - these should be auto-detected now
             let cmint_proof_expr = cmint_constraints
                 .and_then(|c| c.proof.as_ref())
                 .map(|e| quote! { #e })
@@ -340,7 +348,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             let cmint_output_tree_expr = cmint_constraints
                 .and_then(|c| c.output_state_tree_index.as_ref())
                 .map(|e| quote! { #e })
-                .unwrap_or_else(|| quote! { panic!("CMint output_state_tree_index constraint is required") });
+                .unwrap_or_else(|| quote! { 0u8 });  // Default to 0 if not specified
                 
             let cmint_authority_expr = cmint_constraints
                 .and_then(|c| c.authority.as_ref())
@@ -349,6 +357,24 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     __auth.key() 
                 }})
                 .unwrap_or_else(|| quote! { self.authority.key() });
+                
+            // Mint authority defaults to regular authority if not specified
+            let cmint_mint_authority_expr = cmint_constraints
+                .and_then(|c| c.mint_authority.as_ref())
+                .map(|e| quote! { {
+                    let __mint_auth = &self.#e;
+                    __mint_auth.key() 
+                }})
+                .unwrap_or_else(|| cmint_authority_expr.clone());
+                
+            // Freeze authority defaults to regular authority if not specified
+            let cmint_freeze_authority_expr = cmint_constraints
+                .and_then(|c| c.freeze_authority.as_ref())
+                .map(|e| quote! { {
+                    let __freeze_auth = &self.#e;
+                    __freeze_auth.key() 
+                }})
+                .unwrap_or_else(|| cmint_authority_expr.clone());
                 
             let cmint_payer_expr = cmint_constraints
                 .and_then(|c| c.payer.as_ref())
@@ -370,15 +396,15 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 .map(|signer_field| quote! { _bumps.#signer_field })
                 .unwrap_or_else(|| quote! { panic!("mint_signer constraint is required for CMint") });
             
-            // Check if we have compressed PDAs that need authority signing
-            let has_compress_on_init = !fields_to_process.is_empty();
+            // Check if we have ANY compressed PDAs that need authority signing
+            let has_any_cpda = !all_cpda_fields.is_empty();
             
             // Collect all unique authorities and their seeds
-            // Each CPDA MUST have an explicit authority when using compress_on_init
+            // ALL CPDAs MUST have an explicit authority for compression
             let mut authority_expr = None;
             
-            // Check that all compress_on_init CPDAs have an explicit authority
-            for ident in fields_to_process.iter() {
+            // Check that ALL CPDAs have an explicit authority (not just compress_on_init)
+            for ident in all_cpda_fields.iter() {
                 if let Some(cpda) = accs.fields.iter().find_map(|af| {
                     if let AccountField::Field(field) = af {
                         if &field.ident == *ident {
@@ -388,10 +414,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     None
                 }) {
                     if cpda.authority.is_none() {
-                        // Compile-time panic if compress_on_init without authority
+                        // Compile-time panic if CPDA without authority
                         panic!(
-                            "CPDA field '{}' has compress_on_init but no cpda::authority constraint. \
-                            All compress_on_init CPDAs must explicitly specify their authority.",
+                            "CPDA field '{}' has no cpda::authority constraint. \
+                            All CPDAs must explicitly specify their authority for compression operations.",
                             ident
                         );
                     }
@@ -512,8 +538,8 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         mint_compressed_address,
                         root_index,
                         self.#cmint_ident.decimals.unwrap_or(9),
-                        Some(#cmint_authority_expr.into()),
-                        Some(#cmint_authority_expr.into()),
+                        Some(#cmint_mint_authority_expr.into()),
+                        Some(#cmint_freeze_authority_expr.into()),
                         self.#cmint_ident.key().into(),
                     );
                     // Build actions
@@ -601,12 +627,12 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
 
                     // Build authority seeds for compressed PDA operations
                     let mut auth_seeds_vec: Vec<&[u8]> = Vec::new();
-                    let has_compress_on_init = #has_compress_on_init;
+                    let has_any_cpda = #has_any_cpda;
                     
                     // Declare auth_bump_array at this scope so it lives long enough
                     let auth_bump_array;
                     
-                    if has_compress_on_init {
+                    if has_any_cpda {
                         // Build authority seeds from the actual PDA definition
                         #authority_seeds_setup
                         // Use the authority seeds we built from the actual PDA definition
@@ -701,20 +727,10 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         quote! {}
     };
     
-    // Generate auto-close for CPDA fields with compress_on_init
-    let compress_on_init_fields: Vec<_> = accs.fields.iter().filter_map(|af| {
-        if let AccountField::Field(f) = af {
-            if let Some(cpda) = &f.constraints.cpda {
-                if cpda.compress_on_init {
-                    return Some(&f.ident);
-                }
-            }
-        }
-        None
-    }).collect();
-    
-    let auto_close_block = if !compress_on_init_fields.is_empty() {
-        let close_statements: Vec<_> = compress_on_init_fields.iter().map(|ident| {
+    // Generate auto-close ONLY for CPDA fields with compress_on_init
+    // (not for default empty compressed accounts)
+    let auto_close_block = if !cpda_compress_on_init_fields.is_empty() {
+        let close_statements: Vec<_> = cpda_compress_on_init_fields.iter().map(|ident| {
             quote! {
                 self.#ident.close(self.rent_recipient.clone())?;
             }
