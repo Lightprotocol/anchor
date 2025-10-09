@@ -162,7 +162,7 @@ pub fn generate(program: &Program) -> proc_macro2::TokenStream {
                     #maybe_set_return_data
 
                     // Finalize then exit routine.
-                    anchor_lang::AccountsFinalize::finalize(&__accounts, __program_id, __remaining_accounts, __ix_data, &__bumps_for_finalize)?;
+                    anchor_lang::AccountsFinalize::finalize(&mut __accounts, __program_id, __remaining_accounts, __ix_data, &__bumps_for_finalize)?;
                     __accounts.exit(__program_id)
                 }
             }

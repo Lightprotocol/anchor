@@ -708,7 +708,7 @@ pub struct ConstraintGroup {
     pub mint: Option<ConstraintTokenMintGroup>,
     pub realloc: Option<ConstraintReallocGroup>,
     // Compressed constraints
-    pub cmint: Option<ConstraintCMintGroup>,
+    pub cmint: Option<ConstraintCTokenMintGroup>,
     pub cpda: Option<ConstraintCPDAGroup>,
 }
 
@@ -804,20 +804,24 @@ pub enum ConstraintToken {
     ExtensionTokenHookAuthority(Context<ConstraintExtensionAuthority>),
     ExtensionTokenHookProgramId(Context<ConstraintExtensionTokenHookProgramId>),
     ExtensionPermanentDelegate(Context<ConstraintExtensionPermanentDelegate>),
-    // CMint constraints
-    CMintAuthority(Context<ConstraintCMintAuthority>),
-    CMintMintAuthority(Context<ConstraintCMintMintAuthority>),
-    CMintFreezeAuthority(Context<ConstraintCMintFreezeAuthority>),
-    CMintPayer(Context<ConstraintCMintPayer>),
-    CMintDecimals(Context<ConstraintCMintDecimals>),
-    CMintSigner(Context<ConstraintCMintSigner>),
-    CMintSignerSeeds(Context<ConstraintCMintSignerSeeds>),
-    CMintSignerBump(Context<ConstraintCMintSignerBump>),
-    CMintProgramAuthoritySeeds(Context<ConstraintCMintProgramAuthoritySeeds>),
-    CMintProgramAuthorityBump(Context<ConstraintCMintProgramAuthorityBump>),
-    CMintAddressTreeInfo(Context<ConstraintCMintAddressTreeInfo>),
-    CMintProof(Context<ConstraintCMintProof>),
-    CMintOutputStateTreeIndex(Context<ConstraintCMintOutputStateTreeIndex>),
+    // CToken Mint constraints (syntax: mint::)
+    CTokenMintAuthority(Context<ConstraintCTokenMintAuthority>),
+    CTokenMintFreezeAuthority(Context<ConstraintCTokenMintFreezeAuthority>),
+    MetadataName(Context<ConstraintMetadataName>),
+    MetadataSymbol(Context<ConstraintMetadataSymbol>),
+    MetadataUri(Context<ConstraintMetadataUri>),
+    MetadataUpdateAuthority(Context<ConstraintMetadataUpdateAuthority>),
+    MetadataAdditional(Context<ConstraintMetadataAdditional>),
+    CTokenMintPayer(Context<ConstraintCTokenMintPayer>),
+    CTokenMintDecimals(Context<ConstraintCTokenMintDecimals>),
+    CTokenMintSigner(Context<ConstraintCTokenMintSigner>),
+    CTokenMintSignerSeeds(Context<ConstraintCTokenMintSignerSeeds>),
+    CTokenMintSignerBump(Context<ConstraintCTokenMintSignerBump>),
+    CTokenMintProgramAuthoritySeeds(Context<ConstraintCTokenMintProgramAuthoritySeeds>),
+    CTokenMintProgramAuthorityBump(Context<ConstraintCTokenMintProgramAuthorityBump>),
+    CTokenMintAddressTreeInfo(Context<ConstraintCTokenMintAddressTreeInfo>),
+    CTokenMintProof(Context<ConstraintCTokenMintProof>),
+    CTokenMintOutputStateTreeIndex(Context<ConstraintCTokenMintOutputStateTreeIndex>),
     // CPDA constraints
     CPDAAuthority(Context<ConstraintCPDAAuthority>),
     CPDAAddressTreeInfo(Context<ConstraintCPDAAddressTreeInfo>),
@@ -1094,80 +1098,105 @@ pub struct ConstraintMintCompressed {
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintAuthority {
+pub struct ConstraintCTokenMintAuthority {
     pub authority: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintMintAuthority {
-    pub mint_authority: Expr,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConstraintCMintFreezeAuthority {
+pub struct ConstraintCTokenMintFreezeAuthority {
     pub freeze_authority: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintPayer {
+pub struct ConstraintMetadataName {
+    pub name: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintMetadataSymbol {
+    pub symbol: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintMetadataUri {
+    pub uri: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintMetadataUpdateAuthority {
+    pub update_authority: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintMetadataAdditional {
+    pub additional: Expr,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCTokenMintPayer {
     pub payer: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintDecimals {
+pub struct ConstraintCTokenMintDecimals {
     pub decimals: u8,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintSigner {
+pub struct ConstraintCTokenMintSigner {
     pub signer: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintSignerSeeds {
+pub struct ConstraintCTokenMintSignerSeeds {
     pub seeds: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintSignerBump {
+pub struct ConstraintCTokenMintSignerBump {
     pub bump: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintProgramAuthoritySeeds {
+pub struct ConstraintCTokenMintProgramAuthoritySeeds {
     pub seeds: Vec<Expr>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintProgramAuthorityBump {
+pub struct ConstraintCTokenMintProgramAuthorityBump {
     pub bump: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintAddressTreeInfo {
+pub struct ConstraintCTokenMintAddressTreeInfo {
     pub address_tree_info: Expr,
 }
 
-/// CMint proof constraint.
+/// CToken Mint proof constraint.
 /// Auto-detected from instruction parameters if not explicitly specified.
 /// Fails at compile time if multiple proofs exist and none specified.
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintProof {
+pub struct ConstraintCTokenMintProof {
     pub proof: Expr,
 }
 
-/// CMint output state tree index constraint.
+/// CToken Mint output state tree index constraint.
 /// Defaults to 0 if not explicitly specified.
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintOutputStateTreeIndex {
+pub struct ConstraintCTokenMintOutputStateTreeIndex {
     pub output_state_tree_index: Expr,
 }
 
 #[derive(Debug, Clone)]
-pub struct ConstraintCMintGroup {
+pub struct ConstraintCTokenMintGroup {
     pub authority: Option<Expr>,
-    pub mint_authority: Option<Expr>,  // Optional mint authority, defaults to authority
-    pub freeze_authority: Option<Expr>, // Optional freeze authority, defaults to authority
+    pub freeze_authority: Option<Expr>, // Optional freeze authority, defaults to None
+    // Metadata extension fields (optional). If name+symbol+uri provided, metadata is enabled.
+    pub metadata_name: Option<Expr>,
+    pub metadata_symbol: Option<Expr>,
+    pub metadata_uri: Option<Expr>,
+    pub metadata_update_authority: Option<Expr>,
+    pub metadata_additional: Option<Expr>,
     pub decimals: Option<u8>,
     pub payer: Option<Expr>,
     pub mint_signer: Option<Expr>,

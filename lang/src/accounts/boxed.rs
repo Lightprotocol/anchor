@@ -46,7 +46,7 @@ impl<'info, T: ToAccountInfos<'info>> ToAccountInfos<'info> for Box<T> {
 
 impl<'info, B, T: crate::AccountsFinalize<'info, B>> crate::AccountsFinalize<'info, B> for Box<T> {
     fn finalize(
-        &self,
+        &mut self,
         program_id: &Pubkey,
         remaining_accounts: &[AccountInfo<'info>],
         ix_data: &[u8],

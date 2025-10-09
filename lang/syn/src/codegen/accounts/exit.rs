@@ -229,6 +229,8 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             };
 
             // Handle boxed vs unboxed Account
+            // Generate immutable or mutable reference based on compress_on_init flag
+            let is_compress_on_init = cpda_compress_on_init_fields.contains(ident);
             let acc_expr = match accs
                 .fields
                 .iter()
@@ -236,7 +238,21 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     AccountField::Field(f) if &f.ident == *ident => {
                         match &f.ty {
                             Ty::Account(account_ty) => {
-                                if account_ty.boxed { Some(quote! { &*self.#ident }) } else { Some(quote! { &self.#ident }) }
+                                if is_compress_on_init {
+                                    // Immutable for prepare_accounts_for_compression_on_init
+                                    if account_ty.boxed { 
+                                        Some(quote! { &*self.#ident }) 
+                                    } else { 
+                                        Some(quote! { &self.#ident }) 
+                                    }
+                                } else {
+                                    // Mutable for prepare_empty_compressed_accounts_on_init
+                                    if account_ty.boxed { 
+                                        Some(quote! { &mut *self.#ident }) 
+                                    } else { 
+                                        Some(quote! { &mut self.#ident }) 
+                                    }
+                                }
                             }
                             _ => None,
                         }
@@ -251,14 +267,6 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
             let compressed_address_ident = format_ident!("{}_compressed_address", ident);
             let compressed_infos_ident = format_ident!("{}_compressed_infos", ident);
             new_address_params_idents.push(quote! { #new_addr_params_ident });
-
-            // Choose prepare function based on compress_on_init flag
-            let is_compress_on_init = cpda_compress_on_init_fields.contains(ident);
-            let prepare_fn = if is_compress_on_init {
-                quote! { prepare_accounts_for_compression_on_init }
-            } else {
-                quote! { prepare_empty_compressed_accounts_on_init }
-            };
             
             // Get constraint expressions from CPDA including authority
             let (address_tree_info_expr, proof_expr, output_tree_expr, cpda_authority_expr) = accs.fields.iter().find_map(|af| {
@@ -301,13 +309,28 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 );
 
                 // Prepare accounts for compression for #ident
-                let #compressed_infos_ident = light_sdk::compressible::#prepare_fn::<#acc_ty_path>(
-                    &[#acc_expr],
-                    &[#compressed_address_ident],
-                    &[#new_addr_params_ident],
-                    &[#output_tree_expr],
-                    &cpi_accounts,
-                )?;
+                let #compressed_infos_ident = if #is_compress_on_init {
+                    // prepare_accounts_for_compression_on_init takes &[&Account]
+                    light_sdk::compressible::prepare_accounts_for_compression_on_init::<#acc_ty_path>(
+                        &[#acc_expr],
+                        &[#compressed_address_ident],
+                        &[#new_addr_params_ident],
+                        &[#output_tree_expr],
+                        &cpi_accounts,
+                    )?
+                } else {
+                    // prepare_empty_compressed_accounts_on_init takes &mut [&mut Account]
+                    // anchor_lang::solana_program::msg!("acc_expr before prepare_empty_compressed_accounts_on_init: {:?}", #acc_expr);
+
+                    light_sdk::compressible::prepare_empty_compressed_accounts_on_init::<#acc_ty_path>(
+                        &mut [#acc_expr],
+                        &[#compressed_address_ident],
+                        &[#new_addr_params_ident],
+                        &[#output_tree_expr],
+                        &cpi_accounts,
+                    )?
+                };
+                // anchor_lang::solana_program::msg!("acc_expr after: {:?}", #acc_expr);
                 all_compressed_infos.extend(#compressed_infos_ident);
             });
         }
@@ -323,7 +346,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
 
         // Build mint actions extraction and mint creation block
         let cmint_block = if let Some(cmint_ident) = mint_ident {
-            // Get CMint constraints for this field
+            // Get CToken Mint constraints for this field
             let cmint_constraints = accs.fields.iter().find_map(|af| {
                 if let AccountField::Field(f) = af {
                     if f.ident.to_string() == cmint_ident.to_string() {
@@ -358,23 +381,95 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                 }})
                 .unwrap_or_else(|| quote! { self.authority.key() });
                 
-            // Mint authority defaults to regular authority if not specified
-            let cmint_mint_authority_expr = cmint_constraints
-                .and_then(|c| c.mint_authority.as_ref())
-                .map(|e| quote! { {
-                    let __mint_auth = &self.#e;
-                    __mint_auth.key() 
-                }})
-                .unwrap_or_else(|| cmint_authority_expr.clone());
+            // Mint authority is always the cmint::authority (required field)
+            let cmint_mint_authority_expr = quote! { Some(#cmint_authority_expr.into()) };
                 
-            // Freeze authority defaults to regular authority if not specified
+            // Freeze authority defaults to None if not specified (matching SPL behavior)
             let cmint_freeze_authority_expr = cmint_constraints
                 .and_then(|c| c.freeze_authority.as_ref())
-                .map(|e| quote! { {
-                    let __freeze_auth = &self.#e;
-                    __freeze_auth.key() 
-                }})
-                .unwrap_or_else(|| cmint_authority_expr.clone());
+                .map(|e| {
+                    // Check if explicitly set to None
+                    let expr_str = quote! { #e }.to_string();
+                    if expr_str == "None" {
+                        quote! { None }
+                    } else {
+                        quote! { {
+                            let __freeze_auth = &self.#e;
+                            Some(__freeze_auth.key().into())
+                        }}
+                    }
+                })
+                .unwrap_or_else(|| quote! { None });
+            
+            // Metadata extension inputs (optional). Enable only if name+symbol+uri are all provided.
+            // These expressions can reference instruction data (e.g., metadata_name from args)
+            // or account fields (e.g., update_authority from accounts)
+            let metadata_name_expr = cmint_constraints.and_then(|c| c.metadata_name.as_ref());
+            let metadata_symbol_expr = cmint_constraints.and_then(|c| c.metadata_symbol.as_ref());
+            let metadata_uri_expr = cmint_constraints.and_then(|c| c.metadata_uri.as_ref());
+            
+            // Update authority is optional - defaults to mint_authority if not specified
+            // Can be explicitly set to None to make metadata immutable
+            let metadata_update_authority_expr = cmint_constraints.and_then(|c| c.metadata_update_authority.as_ref()).map(|e| {
+                let expr_str = quote! { #e }.to_string();
+                // Check if explicitly set to None
+                if expr_str == "None" {
+                    quote! { None }
+                } else if expr_str.contains('.') || expr_str.contains('(') || expr_str.contains('[') {
+                    // Complex expression - use as-is
+                    quote! { {
+                        let __update_auth = #e;
+                        Some(__update_auth.into())
+                    }}
+                } else {
+                    // Simple identifier - likely an account field, get its key
+                    quote! { Some(self.#e.key()) }
+                }
+            }).unwrap_or_else(|| cmint_mint_authority_expr.clone());
+            
+            let metadata_additional_expr = cmint_constraints.and_then(|c| c.metadata_additional.as_ref());
+            
+            let build_extensions_block = if metadata_name_expr.is_some() && metadata_symbol_expr.is_some() && metadata_uri_expr.is_some() {
+                let name_expr = metadata_name_expr.unwrap();
+                let symbol_expr = metadata_symbol_expr.unwrap();
+                let uri_expr = metadata_uri_expr.unwrap();
+                let additional_expr = metadata_additional_expr.map(|e| quote! { #e }).unwrap_or_else(|| quote! { None });
+                
+                quote! {
+                    // Build metadata extensions from instruction data or account fields
+                    let metadata_extensions: Option<Vec<light_ctoken_types::instructions::extensions::ExtensionInstructionData>> = {
+                        // Evaluate metadata expressions (can reference instruction args or self.accounts)
+                        let metadata_name = #name_expr;
+                        let metadata_symbol = #symbol_expr;
+                        let metadata_uri = #uri_expr;
+                        let metadata_additional = #additional_expr;
+                        
+                        // Validate metadata size limits
+                        if metadata_name.len() > 32 {
+                            panic!("CMint metadata name exceeds size limit: {} bytes (max: 32 bytes).", metadata_name.len());
+                        }
+                        if metadata_symbol.len() > 10 {
+                                panic!("CMint metadata symbol exceeds size limit: {} bytes (max: 10 bytes).", metadata_symbol.len());
+                            }
+                        if metadata_uri.len() > 200 {
+                            panic!("CMint metadata uri exceeds size limit: {} bytes (max: 200 bytes).", metadata_uri.len());
+                        }
+                        
+                        let token_metadata = light_ctoken_types::instructions::extensions::TokenMetadataInstructionData {
+                            update_authority: #metadata_update_authority_expr,
+                            name: metadata_name,
+                            symbol: metadata_symbol,
+                            uri: metadata_uri,
+                            additional_metadata: metadata_additional,
+                        };
+                        Some(vec![light_ctoken_types::instructions::extensions::ExtensionInstructionData::TokenMetadata(token_metadata)])
+                    };
+                }
+            } else {
+                quote! {
+                    let metadata_extensions: Option<Vec<light_ctoken_types::instructions::extensions::ExtensionInstructionData>> = None;
+                }
+            };
                 
             let cmint_payer_expr = cmint_constraints
                 .and_then(|c| c.payer.as_ref())
@@ -526,21 +621,24 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                     // Get tree accounts using the indices
                     let output_state_queue = *cpi_accounts.tree_accounts().unwrap()[output_state_tree_index as usize].key;
                     let address_tree_pubkey = *cpi_accounts.tree_accounts().unwrap()[address_tree_idx as usize].key;
-
+                    use light_compressed_token_sdk::instructions::create_compressed_mint::instruction::derive_compressed_mint_from_spl_mint;
                     // Derive compressed mint address from SPL mint addr (self.#cmint_ident is used as SPL mint key)
-                    let mint_compressed_address = light_compressed_token_sdk::instructions::derive_compressed_mint_from_spl_mint(
+                    let mint_compressed_address = derive_compressed_mint_from_spl_mint(
                         &self.#cmint_ident.key(),
                         &address_tree_pubkey,
                     );
 
+                    // Build metadata extensions (if any)
+                    #build_extensions_block
                     // Build compressed mint with context
-                    let compressed_mint_with_context = light_ctoken_types::instructions::mint_action::CompressedMintWithContext::new(
+                    let compressed_mint_with_context = light_ctoken_types::instructions::mint_action::CompressedMintWithContext::new_with_extensions(
                         mint_compressed_address,
                         root_index,
                         self.#cmint_ident.decimals.unwrap_or(9),
-                        Some(#cmint_mint_authority_expr.into()),
-                        Some(#cmint_freeze_authority_expr.into()),
+                        #cmint_mint_authority_expr,
+                        #cmint_freeze_authority_expr,
                         self.#cmint_ident.key().into(),
+                        metadata_extensions,
                     );
                     // Build actions
                     let actions: Vec<light_compressed_token_sdk::instructions::MintActionType> = __mint_actions
@@ -770,7 +868,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                         quote! {}
                     }
                     _ => quote! {
-                        anchor_lang::AccountsFinalize::finalize(&self.#ident, program_id, _remaining, _ix_data, _bumps)
+                        anchor_lang::AccountsFinalize::finalize(&mut self.#ident, program_id, _remaining, _ix_data, _bumps)
                             .map_err(|e| e.with_account_name(#name_str))?;
                     },
                 }
@@ -781,7 +879,7 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
         #[automatically_derived]
         impl<#combined_generics> anchor_lang::AccountsFinalize<#trait_generics, #bumps_struct_name> for #name<#struct_generics> #where_clause{
             fn finalize(
-                &self,
+                &mut self,
                 program_id: &anchor_lang::solana_program::pubkey::Pubkey,
                 _remaining: &[anchor_lang::solana_program::account_info::AccountInfo<#trait_generics>],
                 _ix_data: &[u8],

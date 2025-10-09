@@ -32,6 +32,12 @@ use solana_program::program_error::ProgramError;
 use solana_program::pubkey::Pubkey;
 use std::{collections::BTreeSet, fmt::Debug, io::Write};
 
+// CToken Program ID constant
+pub const CTOKEN_ID: Pubkey = Pubkey::new_from_array([
+    9, 21, 163, 87, 35, 121, 78, 143, 182, 93, 7, 91, 107, 114, 105, 156, 56, 221, 2, 229, 148,
+    139, 117, 176, 229, 160, 65, 142, 128, 151, 91, 68,
+]);
+
 mod account_meta;
 pub mod accounts;
 mod bpf_upgradeable_state;
@@ -141,7 +147,7 @@ pub trait AccountsFinalize<'info, B>: ToAccountMetas + ToAccountInfos<'info> {
     /// `ix_data` is the raw instruction data for the handler.
     /// `bumps` contains the PDA bumps calculated during account validation.
     fn finalize(
-        &self,
+        &mut self,
         _program_id: &Pubkey,
         _remaining_accounts: &[AccountInfo<'info>],
         _ix_data: &[u8],

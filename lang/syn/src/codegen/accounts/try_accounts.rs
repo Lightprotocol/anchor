@@ -187,11 +187,155 @@ pub fn generate(accs: &AccountsStruct) -> proc_macro2::TokenStream {
                                 #cmint_setup
                             }
                         } else {
-                            quote! {
-                                #[cfg(feature = "anchor-debug")]
-                                ::solana_program::log::sol_log(stringify!(#typed_name));
-                                let #typed_name = anchor_lang::Accounts::try_accounts(__program_id, __accounts, __ix_data, __bumps, __reallocs)
-                                    .map_err(|e| e.with_account_name(#name))?;
+                            // Check if this is an InterfaceAccount<Mint> with mint::token_program constraint
+                            // IMPORTANT: Only mint accounts can be CToken
+                            // Token accounts must always be decompressed on-chain, even for CToken
+                            let token_program_constraint = if matches!(&f.ty, crate::Ty::InterfaceAccount(_)) {
+                                // ONLY check mint:: constraints, NOT token:: constraints
+                                f.constraints.mint.as_ref()
+                                    .and_then(|mc| mc.token_program.as_ref())
+                            } else {
+                                None
+                            };
+                            
+                            if let Some(token_prog_ref) = token_program_constraint {
+                                // We have a token_program constraint - need to find its position in accounts
+                                // to peek at the right account
+                                let token_prog_name = quote! { #token_prog_ref }.to_string();
+                                
+                                // Find the index of the token_program field
+                                let token_prog_index = accs.fields.iter().position(|field| {
+                                    if let AccountField::Field(f) = field {
+                                        f.ident.to_string() == token_prog_name
+                                    } else {
+                                        false
+                                    }
+                                });
+                                
+                                // Check if we need to wrap in Box
+                                let is_boxed = if let crate::Ty::InterfaceAccount(iac) = &f.ty {
+                                    iac.boxed
+                                } else {
+                                    false
+                                };
+                                
+                                let interface_creation = if let Some(prog_idx) = token_prog_index {
+                                    // Calculate relative position of token_program
+                                    let current_idx = accs.fields.iter().position(|field| {
+                                        if let AccountField::Field(other_f) = field {
+                                            std::ptr::eq(other_f, f)
+                                        } else {
+                                            false
+                                        }
+                                    }).unwrap_or(0);
+                                    
+                                    if prog_idx < current_idx {
+                                        // Backward lookup: token_program was already deserialized
+                                        quote! {
+                                            if __accounts.is_empty() {
+                                                return Err(anchor_lang::error::ErrorCode::AccountNotEnoughKeys.into());
+                                            }
+                                            let __acc = &__accounts[0];
+                                            *__accounts = &__accounts[1..];
+                                            
+                                            // Use already-deserialized token_program to check if CToken
+                                            let __is_ctoken = #token_prog_ref.key() == &anchor_lang::CTOKEN_ID;
+                                            
+                                            if __is_ctoken {
+                                                // Use try_from_ctoken to skip deserialization for compressed accounts
+                                                anchor_lang::accounts::interface_account::InterfaceAccount::try_from_ctoken(__acc)
+                                                    .map_err(|e| e.with_account_name(#name))?
+                                            } else {
+                                                // Normal deserialization for SPL/T22
+                                                anchor_lang::accounts::interface_account::InterfaceAccount::try_from(__acc)
+                                                    .map_err(|e| e.with_account_name(#name))?
+                                            }
+                                        }
+                                    } else {
+                                        // Forward lookup: peek ahead to token_program
+                                        let peek_offset = prog_idx - current_idx;
+                                        
+                                        quote! {
+                                            if __accounts.is_empty() {
+                                                return Err(anchor_lang::error::ErrorCode::AccountNotEnoughKeys.into());
+                                            }
+                                            let __acc = &__accounts[0];
+                                            
+                                            // Peek ahead to check if token_program is CTOKEN_ID
+                                            let __is_ctoken = if __accounts.len() > #peek_offset {
+                                                __accounts[#peek_offset].key == &anchor_lang::CTOKEN_ID
+                                            } else {
+                                                false
+                                            };
+                                            
+                                            *__accounts = &__accounts[1..];
+                                            
+                                            if __is_ctoken {
+                                                // Use try_from_ctoken to skip deserialization for compressed accounts
+                                                anchor_lang::accounts::interface_account::InterfaceAccount::try_from_ctoken(__acc)
+                                                    .map_err(|e| e.with_account_name(#name))?
+                                            } else {
+                                                // Normal deserialization for SPL/T22
+                                                anchor_lang::accounts::interface_account::InterfaceAccount::try_from(__acc)
+                                                    .map_err(|e| e.with_account_name(#name))?
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Check if this is a state field reference (e.g., pool_state.token_0_program)
+                                    if token_prog_name.contains('.') {
+                                        // Runtime check - read token_program from already-deserialized account
+                                        quote! {
+                                            if __accounts.is_empty() {
+                                                return Err(anchor_lang::error::ErrorCode::AccountNotEnoughKeys.into());
+                                            }
+                                            let __acc = &__accounts[0];
+                                            *__accounts = &__accounts[1..];
+                                            
+                                            // Use runtime token_program value from state field
+                                            anchor_lang::accounts::interface_account::InterfaceAccount::try_from_with_token_program(__acc, &#token_prog_ref)
+                                                .map_err(|e| e.with_account_name(#name))?
+                                        }
+                                    } else {
+                                        // Fallback if we can't find the token_program field in accounts
+                                        quote! {
+                                            if __accounts.is_empty() {
+                                                return Err(anchor_lang::error::ErrorCode::AccountNotEnoughKeys.into());
+                                            }
+                                            let __acc = &__accounts[0];
+                                            *__accounts = &__accounts[1..];
+                                            
+                                            // Default to normal deserialization if we can't determine token_program
+                                            anchor_lang::accounts::interface_account::InterfaceAccount::try_from(__acc)
+                                                .map_err(|e| e.with_account_name(#name))?
+                                        }
+                                    }
+                                };
+                                
+                                if is_boxed {
+                                    quote! {
+                                        #[cfg(feature = "anchor-debug")]
+                                        ::solana_program::log::sol_log(stringify!(#typed_name));
+                                        let #typed_name = Box::new({
+                                            #interface_creation
+                                        });
+                                    }
+                                } else {
+                                    quote! {
+                                        #[cfg(feature = "anchor-debug")]
+                                        ::solana_program::log::sol_log(stringify!(#typed_name));
+                                        let #typed_name = {
+                                            #interface_creation
+                                        };
+                                    }
+                                }
+                            } else {
+                                quote! {
+                                    #[cfg(feature = "anchor-debug")]
+                                    ::solana_program::log::sol_log(stringify!(#typed_name));
+                                    let #typed_name = anchor_lang::Accounts::try_accounts(__program_id, __accounts, __ix_data, __bumps, __reallocs)
+                                        .map_err(|e| e.with_account_name(#name))?;
+                                }
                             }
                         }
                     }

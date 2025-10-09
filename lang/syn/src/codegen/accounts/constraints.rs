@@ -1326,9 +1326,30 @@ fn generate_constraint_mint(
     let name = &f.ident;
     let account_ref = generate_account_ref(f);
 
+    // Check if this is a CToken mint (token_program = CTOKEN_ID)
+    let is_ctoken_check = if let Some(token_program) = &c.token_program {
+        // Handle both account references and state field Pubkeys
+        let token_prog_str = quote! { #token_program }.to_string();
+        if token_prog_str.contains('.') {
+            // State field - already a Pubkey
+            quote! {
+                let __is_ctoken = #token_program == anchor_lang::CTOKEN_ID;
+            }
+        } else {
+            // Account - need to call .key()
+            quote! {
+                let __is_ctoken = #token_program.key() == anchor_lang::CTOKEN_ID;
+            }
+        }
+    } else {
+        quote! {
+            let __is_ctoken = false;
+        }
+    };
+
     let decimal_check = match &c.decimals {
         Some(decimals) => quote! {
-            if #name.decimals != #decimals {
+            if !__is_ctoken && #name.decimals != #decimals {
                 return Err(anchor_lang::error::ErrorCode::ConstraintMintDecimals.into());
             }
         },
@@ -1340,7 +1361,7 @@ fn generate_constraint_mint(
             let mint_authority_optional_check = optional_check_scope.generate_check(mint_authority);
             quote! {
                 #mint_authority_optional_check
-                if #name.mint_authority != anchor_lang::solana_program::program_option::COption::Some(#mint_authority.key()) {
+                if !__is_ctoken && #name.mint_authority != anchor_lang::solana_program::program_option::COption::Some(#mint_authority.key()) {
                     return Err(anchor_lang::error::ErrorCode::ConstraintMintMintAuthority.into());
                 }
             }
@@ -1353,7 +1374,7 @@ fn generate_constraint_mint(
                 optional_check_scope.generate_check(freeze_authority);
             quote! {
                 #freeze_authority_optional_check
-                if #name.freeze_authority != anchor_lang::solana_program::program_option::COption::Some(#freeze_authority.key()) {
+                if !__is_ctoken && #name.freeze_authority != anchor_lang::solana_program::program_option::COption::Some(#freeze_authority.key()) {
                     return Err(anchor_lang::error::ErrorCode::ConstraintMintFreezeAuthority.into());
                 }
             }
@@ -1363,9 +1384,28 @@ fn generate_constraint_mint(
     let token_program_check = match &c.token_program {
         Some(token_program) => {
             let token_program_optional_check = optional_check_scope.generate_check(token_program);
+            // Handle both account references and state field Pubkeys
+            let token_prog_str = quote! { #token_program }.to_string();
+            let token_prog_key = if token_prog_str.contains('.') {
+                // State field - already a Pubkey
+                quote! { &#token_program }
+            } else {
+                // Account - need to call .key()
+                quote! { &#token_program.key() }
+            };
             quote! {
                 #token_program_optional_check
-                if #account_ref.owner != &#token_program.key() { return Err(anchor_lang::error::ErrorCode::ConstraintMintTokenProgram.into()); }
+                if __is_ctoken {
+                    // CToken mints are uninitialized accounts owned by system_program
+                    if #account_ref.owner != &anchor_lang::solana_program::system_program::ID {
+                        return Err(anchor_lang::error::ErrorCode::ConstraintMintTokenProgram.into());
+                    }
+                } else {
+                    // Regular SPL/Token2022 mints are owned by their token program
+                    if #account_ref.owner != #token_prog_key {
+                        return Err(anchor_lang::error::ErrorCode::ConstraintMintTokenProgram.into());
+                    }
+                }
             }
         }
         None => quote! {},
@@ -1553,20 +1593,29 @@ fn generate_constraint_mint(
 
     quote! {
         {
+            // Check if this is a CToken mint
+            #is_ctoken_check
+            
             #decimal_check
             #mint_authority_check
             #freeze_authority_check
+            
+            // Check token_program ownership (system_program for CToken, token_program for SPL/T22)
             #token_program_check
-            #group_pointer_authority_check
-            #group_pointer_group_address_check
-            #group_member_pointer_authority_check
-            #group_member_pointer_member_address_check
-            #metadata_pointer_authority_check
-            #metadata_pointer_metadata_address_check
-            #close_authority_check
-            #permanent_delegate_check
-            #transfer_hook_authority_check
-            #transfer_hook_program_id_check
+            
+            // Skip extension checks for CToken mints
+            if !__is_ctoken {
+                #group_pointer_authority_check
+                #group_pointer_group_address_check
+                #group_member_pointer_authority_check
+                #group_member_pointer_member_address_check
+                #metadata_pointer_authority_check
+                #metadata_pointer_metadata_address_check
+                #close_authority_check
+                #permanent_delegate_check
+                #transfer_hook_authority_check
+                #transfer_hook_program_id_check
+            }
         }
     }
 }

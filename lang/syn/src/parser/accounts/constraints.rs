@@ -71,24 +71,46 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                 .unwrap_or_else(|| ident.span());
 
             match kw.as_str() {
-                "authority" => ConstraintToken::MintAuthority(Context::new(
-                    span,
-                    ConstraintMintAuthority {
-                        mint_auth: stream.parse()?,
-                    },
-                )),
-                "freeze_authority" => ConstraintToken::MintFreezeAuthority(Context::new(
-                    span,
-                    ConstraintMintFreezeAuthority {
-                        mint_freeze_auth: stream.parse()?,
-                    },
-                )),
-                "decimals" => ConstraintToken::MintDecimals(Context::new(
-                    span,
-                    ConstraintMintDecimals {
-                        decimals: stream.parse()?,
-                    },
-                )),
+                // Shared constraint names - return both SPL and CToken variants
+                // The validator will use the correct one based on account type
+                "authority" => {
+                    // For CMint accounts, this creates a CTokenMintAuthority
+                    // For Mint accounts, validator will convert to MintAuthority
+                    ConstraintToken::CTokenMintAuthority(Context::new(
+                        span,
+                        ConstraintCTokenMintAuthority {
+                            authority: stream.parse()?,
+                        },
+                    ))
+                },
+                "freeze_authority" => {
+                    ConstraintToken::CTokenMintFreezeAuthority(Context::new(
+                        span,
+                        ConstraintCTokenMintFreezeAuthority {
+                            freeze_authority: stream.parse()?,
+                        },
+                    ))
+                },
+                "decimals" => {
+                    // Try parsing as u8 first (CToken style), fall back to Expr (SPL style)
+                    match stream.parse::<syn::LitInt>() {
+                        Ok(lit) => ConstraintToken::CTokenMintDecimals(Context::new(
+                            span,
+                            ConstraintCTokenMintDecimals {
+                                decimals: lit.base10_parse()?,
+                            },
+                        )),
+                        Err(_) => {
+                            // Reset stream and try as Expr for SPL
+                            ConstraintToken::MintDecimals(Context::new(
+                                span,
+                                ConstraintMintDecimals {
+                                    decimals: stream.parse()?,
+                                },
+                            ))
+                        }
+                    }
+                },
                 "token_program" => ConstraintToken::MintTokenProgram(Context::new(
                     span,
                     ConstraintTokenProgram {
@@ -104,7 +126,68 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                         },
                     ))
                 }
-                _ => return Err(ParseError::new(ident.span(), "Invalid attribute")),
+                // CToken Mint constraints (for CMint accounts)
+                "payer" => ConstraintToken::CTokenMintPayer(Context::new(
+                    span,
+                    ConstraintCTokenMintPayer {
+                        payer: stream.parse()?,
+                    },
+                )),
+                "mint_signer" => ConstraintToken::CTokenMintSigner(Context::new(
+                    span,
+                    ConstraintCTokenMintSigner {
+                        signer: stream.parse()?,
+                    },
+                )),
+                "mint_signer_seeds" => {
+                    let seeds_stream;
+                    let bracket = bracketed!(seeds_stream in stream);
+                    let seeds: Punctuated<Expr, Token![,]> = seeds_stream.parse_terminated(Expr::parse)?;
+                    ConstraintToken::CTokenMintSignerSeeds(Context::new(
+                        span.join(bracket.span).unwrap_or(span),
+                        ConstraintCTokenMintSignerSeeds { seeds: seeds.into_iter().collect() },
+                    ))
+                }
+                "mint_signer_bump" => ConstraintToken::CTokenMintSignerBump(Context::new(
+                    span,
+                    ConstraintCTokenMintSignerBump {
+                        bump: stream.parse()?,
+                    },
+                )),
+                "program_authority_seeds" => {
+                    let seeds_stream;
+                    let bracket = bracketed!(seeds_stream in stream);
+                    let seeds: Punctuated<Expr, Token![,]> = seeds_stream.parse_terminated(Expr::parse)?;
+                    ConstraintToken::CTokenMintProgramAuthoritySeeds(Context::new(
+                        span.join(bracket.span).unwrap_or(span),
+                        ConstraintCTokenMintProgramAuthoritySeeds { seeds: seeds.into_iter().collect() },
+                    ))
+                }
+                "program_authority_bump" => ConstraintToken::CTokenMintProgramAuthorityBump(Context::new(
+                    span,
+                    ConstraintCTokenMintProgramAuthorityBump {
+                        bump: stream.parse()?,
+                    },
+                )),
+                "address_tree_info" => ConstraintToken::CTokenMintAddressTreeInfo(Context::new(
+                    span,
+                    ConstraintCTokenMintAddressTreeInfo {
+                        address_tree_info: stream.parse()?,
+                    },
+                )),
+                "proof" => ConstraintToken::CTokenMintProof(Context::new(
+                    span,
+                    ConstraintCTokenMintProof {
+                        proof: stream.parse()?,
+                    },
+                )),
+                "output_state_tree_index" => ConstraintToken::CTokenMintOutputStateTreeIndex(Context::new(
+                    span,
+                    ConstraintCTokenMintOutputStateTreeIndex {
+                        output_state_tree_index: stream.parse()?,
+                    },
+                )),
+                _ => return Err(ParseError::new(ident.span(), "Invalid mint attribute")),
             }
         }
         "extensions" => {
@@ -362,7 +445,7 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                     ConstraintCPDACompressOnInit {},
                 ))
             }
-            "cmint" => {
+            "metadata" => {
             stream.parse::<Token![:]>()?;
             stream.parse::<Token![:]>()?;
             let kw = stream.call(Ident::parse_any)?.to_string();
@@ -374,91 +457,49 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                 .unwrap_or_else(|| ident.span());
 
             match kw.as_str() {
-                        "authority" => ConstraintToken::CMintAuthority(Context::new(
+                        "name" => {
+                            let name_expr: Expr = stream.parse()?;
+                            validate_metadata_size_limit(&name_expr, "name", 32, span)?;
+                            ConstraintToken::MetadataName(Context::new(
+                                span,
+                                ConstraintMetadataName {
+                                    name: name_expr,
+                                },
+                            ))
+                        },
+                        "symbol" => {
+                            let symbol_expr: Expr = stream.parse()?;
+                            validate_metadata_size_limit(&symbol_expr, "symbol", 10, span)?;
+                            ConstraintToken::MetadataSymbol(Context::new(
+                                span,
+                                ConstraintMetadataSymbol {
+                                    symbol: symbol_expr,
+                                },
+                            ))
+                        },
+                        "uri" => {
+                            let uri_expr: Expr = stream.parse()?;
+                            validate_metadata_size_limit(&uri_expr, "uri", 200, span)?;
+                            ConstraintToken::MetadataUri(Context::new(
+                                span,
+                                ConstraintMetadataUri {
+                                    uri: uri_expr,
+                                },
+                            ))
+                        },
+                        "update_authority" => ConstraintToken::MetadataUpdateAuthority(Context::new(
                             span,
-                            ConstraintCMintAuthority {
-                                authority: stream.parse()?,
+                            ConstraintMetadataUpdateAuthority {
+                                update_authority: stream.parse()?,
                             },
                         )),
-                        "mint_authority" => ConstraintToken::CMintMintAuthority(Context::new(
+                        "additional" => ConstraintToken::MetadataAdditional(Context::new(
                             span,
-                            ConstraintCMintMintAuthority {
-                                mint_authority: stream.parse()?,
+                            ConstraintMetadataAdditional {
+                                additional: stream.parse()?,
                             },
                         )),
-                        "freeze_authority" => ConstraintToken::CMintFreezeAuthority(Context::new(
-                            span,
-                            ConstraintCMintFreezeAuthority {
-                                freeze_authority: stream.parse()?,
-                            },
-                        )),
-                        "payer" => ConstraintToken::CMintPayer(Context::new(
-                            span,
-                            ConstraintCMintPayer {
-                                payer: stream.parse()?,
-                            },
-                        )),
-                        "decimals" => ConstraintToken::CMintDecimals(Context::new(
-                    span,
-                    ConstraintCMintDecimals {
-                        decimals: stream.parse::<syn::LitInt>()?.base10_parse()?,
-                    },
-                )),
-                "mint_signer" => ConstraintToken::CMintSigner(Context::new(
-                    span,
-                    ConstraintCMintSigner {
-                        signer: stream.parse()?,
-                    },
-                )),
-                "mint_signer_seeds" => {
-                    let seeds_stream;
-                    let bracket = bracketed!(seeds_stream in stream);
-                    let seeds: Punctuated<Expr, Token![,]> = seeds_stream.parse_terminated(Expr::parse)?;
-                    ConstraintToken::CMintSignerSeeds(Context::new(
-                        span.join(bracket.span).unwrap_or(span),
-                        ConstraintCMintSignerSeeds { seeds: seeds.into_iter().collect() },
-                    ))
-                }
-                "mint_signer_bump" => ConstraintToken::CMintSignerBump(Context::new(
-                    span,
-                    ConstraintCMintSignerBump {
-                        bump: stream.parse()?,
-                    },
-                )),
-                "program_authority_seeds" => {
-                    let seeds_stream;
-                    let bracket = bracketed!(seeds_stream in stream);
-                    let seeds: Punctuated<Expr, Token![,]> = seeds_stream.parse_terminated(Expr::parse)?;
-                    ConstraintToken::CMintProgramAuthoritySeeds(Context::new(
-                        span.join(bracket.span).unwrap_or(span),
-                        ConstraintCMintProgramAuthoritySeeds { seeds: seeds.into_iter().collect() },
-                    ))
-                }
-                        "program_authority_bump" => ConstraintToken::CMintProgramAuthorityBump(Context::new(
-                            span,
-                            ConstraintCMintProgramAuthorityBump {
-                                bump: stream.parse()?,
-                            },
-                        )),
-                        "address_tree_info" => ConstraintToken::CMintAddressTreeInfo(Context::new(
-                            span,
-                            ConstraintCMintAddressTreeInfo {
-                                address_tree_info: stream.parse()?,
-                            },
-                        )),
-                        "proof" => ConstraintToken::CMintProof(Context::new(
-                            span,
-                            ConstraintCMintProof {
-                                proof: stream.parse()?,
-                            },
-                        )),
-                        "output_state_tree_index" => ConstraintToken::CMintOutputStateTreeIndex(Context::new(
-                            span,
-                            ConstraintCMintOutputStateTreeIndex {
-                                output_state_tree_index: stream.parse()?,
-                            },
-                        )),
-                _ => return Err(ParseError::new(ident.span(), "Invalid cmint attribute")),
+                _ => return Err(ParseError::new(ident.span(), "Invalid metadata attribute")),
             }
         }
         "associated_token" => {
@@ -713,20 +754,25 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub realloc: Option<Context<ConstraintRealloc>>,
     pub realloc_payer: Option<Context<ConstraintReallocPayer>>,
     pub realloc_zero: Option<Context<ConstraintReallocZero>>,
-    // CMint constraints
-    pub cmint_authority: Option<Context<ConstraintCMintAuthority>>,
-    pub cmint_mint_authority: Option<Context<ConstraintCMintMintAuthority>>,
-    pub cmint_freeze_authority: Option<Context<ConstraintCMintFreezeAuthority>>,
-    pub cmint_payer: Option<Context<ConstraintCMintPayer>>,
-    pub cmint_decimals: Option<Context<ConstraintCMintDecimals>>,
-    pub cmint_signer: Option<Context<ConstraintCMintSigner>>,
-    pub cmint_signer_seeds: Option<Context<ConstraintCMintSignerSeeds>>,
-    pub cmint_signer_bump: Option<Context<ConstraintCMintSignerBump>>,
-    pub cmint_program_authority_seeds: Option<Context<ConstraintCMintProgramAuthoritySeeds>>,
-    pub cmint_program_authority_bump: Option<Context<ConstraintCMintProgramAuthorityBump>>,
-    pub cmint_address_tree_info: Option<Context<ConstraintCMintAddressTreeInfo>>,
-    pub cmint_proof: Option<Context<ConstraintCMintProof>>,
-    pub cmint_output_state_tree_index: Option<Context<ConstraintCMintOutputStateTreeIndex>>,
+    // CToken Mint constraints
+    pub ctoken_mint_authority: Option<Context<ConstraintCTokenMintAuthority>>,
+    pub ctoken_mint_freeze_authority: Option<Context<ConstraintCTokenMintFreezeAuthority>>,
+    pub ctoken_mint_payer: Option<Context<ConstraintCTokenMintPayer>>,
+    pub ctoken_mint_decimals: Option<Context<ConstraintCTokenMintDecimals>>,
+    pub ctoken_mint_signer: Option<Context<ConstraintCTokenMintSigner>>,
+    pub ctoken_mint_signer_seeds: Option<Context<ConstraintCTokenMintSignerSeeds>>,
+    pub ctoken_mint_signer_bump: Option<Context<ConstraintCTokenMintSignerBump>>,
+    pub ctoken_mint_program_authority_seeds: Option<Context<ConstraintCTokenMintProgramAuthoritySeeds>>,
+    pub ctoken_mint_program_authority_bump: Option<Context<ConstraintCTokenMintProgramAuthorityBump>>,
+    pub ctoken_mint_address_tree_info: Option<Context<ConstraintCTokenMintAddressTreeInfo>>,
+    pub ctoken_mint_proof: Option<Context<ConstraintCTokenMintProof>>,
+    pub ctoken_mint_output_state_tree_index: Option<Context<ConstraintCTokenMintOutputStateTreeIndex>>,
+    // Metadata constraints (for CToken mints)
+    pub metadata_name: Option<Context<ConstraintMetadataName>>,
+    pub metadata_symbol: Option<Context<ConstraintMetadataSymbol>>,
+    pub metadata_uri: Option<Context<ConstraintMetadataUri>>,
+    pub metadata_update_authority: Option<Context<ConstraintMetadataUpdateAuthority>>,
+    pub metadata_additional: Option<Context<ConstraintMetadataAdditional>>,
     // CPDA constraints
     pub cpda_authority: Option<Context<ConstraintCPDAAuthority>>,
     pub cpda_address_tree_info: Option<Context<ConstraintCPDAAddressTreeInfo>>,
@@ -780,19 +826,23 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc: None,
             realloc_payer: None,
             realloc_zero: None,
-            cmint_authority: None,
-            cmint_mint_authority: None,
-            cmint_freeze_authority: None,
-            cmint_payer: None,
-            cmint_decimals: None,
-            cmint_signer: None,
-            cmint_signer_seeds: None,
-            cmint_signer_bump: None,
-            cmint_program_authority_seeds: None,
-            cmint_program_authority_bump: None,
-            cmint_address_tree_info: None,
-            cmint_proof: None,
-            cmint_output_state_tree_index: None,
+            ctoken_mint_authority: None,
+            ctoken_mint_freeze_authority: None,
+            ctoken_mint_payer: None,
+            ctoken_mint_decimals: None,
+            ctoken_mint_signer: None,
+            ctoken_mint_signer_seeds: None,
+            ctoken_mint_signer_bump: None,
+            ctoken_mint_program_authority_seeds: None,
+            ctoken_mint_program_authority_bump: None,
+            ctoken_mint_address_tree_info: None,
+            ctoken_mint_proof: None,
+            ctoken_mint_output_state_tree_index: None,
+            metadata_name: None,
+            metadata_symbol: None,
+            metadata_uri: None,
+            metadata_update_authority: None,
+            metadata_additional: None,
             cpda_authority: None,
             cpda_address_tree_info: None,
             cpda_proof: None,
@@ -949,34 +999,34 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             }
         }
         
-        // Similar auto-detection for CMint constraints
-        let has_cmint = self.cmint_authority.is_some() ||
-                        self.cmint_payer.is_some() ||
-                        self.cmint_decimals.is_some() ||
-                        self.cmint_signer.is_some() ||
-                        self.cmint_address_tree_info.is_some() ||
-                        self.cmint_output_state_tree_index.is_some();
+        // Similar auto-detection for CToken Mint constraints
+        let has_ctoken_mint = self.ctoken_mint_authority.is_some() ||
+                        self.ctoken_mint_payer.is_some() ||
+                        self.ctoken_mint_decimals.is_some() ||
+                        self.ctoken_mint_signer.is_some() ||
+                        self.ctoken_mint_address_tree_info.is_some() ||
+                        self.ctoken_mint_output_state_tree_index.is_some();
                         
-        if has_cmint {
+        if has_ctoken_mint {
             // Auto-detect proof if not explicitly set
-            if self.cmint_proof.is_none() {
+            if self.ctoken_mint_proof.is_none() {
                 match find_validity_proof_field()? {
                     Some(proof_field) => {
                         let proof_expr: Expr = syn::parse_str(&proof_field)
                             .map_err(|_| ParseError::new(
                                 proc_macro2::Span::call_site(),
-                                format!("Failed to parse auto-detected proof field for CMint: {}", proof_field)
+                                format!("Failed to parse auto-detected proof field for CToken Mint: {}", proof_field)
                             ))?;
-                        self.cmint_proof = Some(Context::new(
+                        self.ctoken_mint_proof = Some(Context::new(
                             proc_macro2::Span::call_site(),
-                            ConstraintCMintProof { proof: proof_expr }
+                            ConstraintCTokenMintProof { proof: proof_expr }
                         ));
                     }
                     None => {
-                        // No proof found - this is an error for CMint
+                        // No proof found - this is an error for CToken Mint
                         return Err(ParseError::new(
                             proc_macro2::Span::call_site(),
-                            "CMint constraints require a proof field. Either add 'cmint::proof = <expr>' \
+                            "CToken Mint constraints require a proof field. Either add 'mint::proof = <expr>' \
                             or ensure your instruction has a ValidityProof parameter."
                         ));
                     }
@@ -984,12 +1034,12 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             }
             
             // Default output_state_tree_index to 0 if not explicitly set
-            if self.cmint_output_state_tree_index.is_none() {
+            if self.ctoken_mint_output_state_tree_index.is_none() {
                 let default_index: Expr = syn::parse_str("0")
                     .expect("Failed to parse default output_state_tree_index");
-                self.cmint_output_state_tree_index = Some(Context::new(
+                self.ctoken_mint_output_state_tree_index = Some(Context::new(
                     proc_macro2::Span::call_site(),
-                    ConstraintCMintOutputStateTreeIndex { output_state_tree_index: default_index }
+                    ConstraintCTokenMintOutputStateTreeIndex { output_state_tree_index: default_index }
                 ));
             }
         }
@@ -1223,19 +1273,23 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             realloc,
             realloc_payer,
             realloc_zero,
-            cmint_authority,
-            cmint_mint_authority,
-            cmint_freeze_authority,
-            cmint_payer,
-            cmint_decimals,
-            cmint_signer,
-            cmint_signer_seeds,
-            cmint_signer_bump,
-            cmint_program_authority_seeds,
-            cmint_program_authority_bump,
-            cmint_address_tree_info,
-            cmint_proof,
-            cmint_output_state_tree_index,
+            ctoken_mint_authority,
+            ctoken_mint_freeze_authority,
+            ctoken_mint_payer,
+            ctoken_mint_decimals,
+            ctoken_mint_signer,
+            ctoken_mint_signer_seeds,
+            ctoken_mint_signer_bump,
+            ctoken_mint_program_authority_seeds,
+            ctoken_mint_program_authority_bump,
+            ctoken_mint_address_tree_info,
+            ctoken_mint_proof,
+            ctoken_mint_output_state_tree_index,
+            ref metadata_name,
+            ref metadata_symbol,
+            ref metadata_uri,
+            ref metadata_update_authority,
+            ref metadata_additional,
             cpda_authority,
             cpda_address_tree_info,
             cpda_proof,
@@ -1478,27 +1532,31 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             seeds,
             token_account: if !is_init {token_account} else {None},
             mint: if !is_init {mint} else {None},
-            cmint: if cmint_authority.is_some() || cmint_mint_authority.is_some() || 
-                       cmint_freeze_authority.is_some() || cmint_payer.is_some() || cmint_decimals.is_some() || 
-                       cmint_signer.is_some() || cmint_signer_seeds.is_some() || 
-                       cmint_signer_bump.is_some() ||
-                       cmint_program_authority_seeds.is_some() || cmint_program_authority_bump.is_some() ||
-                       cmint_address_tree_info.is_some() || cmint_proof.is_some() || 
-                       cmint_output_state_tree_index.is_some() {
-                Some(ConstraintCMintGroup {
-                    authority: cmint_authority.map(|c| c.into_inner().authority),
-                    mint_authority: cmint_mint_authority.map(|c| c.into_inner().mint_authority),
-                    freeze_authority: cmint_freeze_authority.map(|c| c.into_inner().freeze_authority),
-                    decimals: cmint_decimals.map(|c| c.into_inner().decimals),
-                    payer: cmint_payer.map(|c| c.into_inner().payer),
-                    mint_signer: cmint_signer.map(|c| c.into_inner().signer),
-                    mint_signer_seeds: cmint_signer_seeds.map(|c| c.into_inner().seeds),
-                    mint_signer_bump: cmint_signer_bump.map(|c| c.into_inner().bump),
-                    program_authority_seeds: cmint_program_authority_seeds.map(|c| c.into_inner().seeds),
-                    program_authority_bump: cmint_program_authority_bump.map(|c| c.into_inner().bump),
-                    address_tree_info: cmint_address_tree_info.map(|c| c.into_inner().address_tree_info),
-                    proof: cmint_proof.map(|c| c.into_inner().proof),
-                    output_state_tree_index: cmint_output_state_tree_index.map(|c| c.into_inner().output_state_tree_index),
+            cmint: if ctoken_mint_authority.is_some() || 
+                       ctoken_mint_freeze_authority.is_some() || metadata_name.is_some() || metadata_symbol.is_some() || metadata_uri.is_some() || metadata_update_authority.is_some() || metadata_additional.is_some() || ctoken_mint_payer.is_some() || ctoken_mint_decimals.is_some() || 
+                       ctoken_mint_signer.is_some() || ctoken_mint_signer_seeds.is_some() || 
+                       ctoken_mint_signer_bump.is_some() ||
+                       ctoken_mint_program_authority_seeds.is_some() || ctoken_mint_program_authority_bump.is_some() ||
+                       ctoken_mint_address_tree_info.is_some() || ctoken_mint_proof.is_some() || 
+                       ctoken_mint_output_state_tree_index.is_some() {
+                Some(ConstraintCTokenMintGroup {
+                    authority: ctoken_mint_authority.map(|c| c.into_inner().authority),
+                    metadata_name: metadata_name.as_ref().map(|c| c.clone().into_inner().name),
+                    metadata_symbol: metadata_symbol.as_ref().map(|c| c.clone().into_inner().symbol),
+                    metadata_uri: metadata_uri.as_ref().map(|c| c.clone().into_inner().uri),
+                    metadata_update_authority: metadata_update_authority.as_ref().map(|c| c.clone().into_inner().update_authority),
+                    metadata_additional: metadata_additional.as_ref().map(|c| c.clone().into_inner().additional),
+                    freeze_authority: ctoken_mint_freeze_authority.map(|c| c.into_inner().freeze_authority),
+                    decimals: ctoken_mint_decimals.map(|c| c.into_inner().decimals),
+                    payer: ctoken_mint_payer.map(|c| c.into_inner().payer),
+                    mint_signer: ctoken_mint_signer.map(|c| c.into_inner().signer),
+                    mint_signer_seeds: ctoken_mint_signer_seeds.map(|c| c.into_inner().seeds),
+                    mint_signer_bump: ctoken_mint_signer_bump.map(|c| c.into_inner().bump),
+                    program_authority_seeds: ctoken_mint_program_authority_seeds.map(|c| c.into_inner().seeds),
+                    program_authority_bump: ctoken_mint_program_authority_bump.map(|c| c.into_inner().bump),
+                    address_tree_info: ctoken_mint_address_tree_info.map(|c| c.into_inner().address_tree_info),
+                    proof: ctoken_mint_proof.map(|c| c.into_inner().proof),
+                    output_state_tree_index: ctoken_mint_output_state_tree_index.map(|c| c.into_inner().output_state_tree_index),
                 })
             } else {
                 None
@@ -1578,19 +1636,23 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ConstraintToken::ExtensionPermanentDelegate(c) => {
                 self.add_extension_permanent_delegate(c)
             }
-            ConstraintToken::CMintAuthority(c) => self.add_cmint_authority(c),
-            ConstraintToken::CMintMintAuthority(c) => self.add_cmint_mint_authority(c),
-            ConstraintToken::CMintFreezeAuthority(c) => self.add_cmint_freeze_authority(c),
-            ConstraintToken::CMintPayer(c) => self.add_cmint_payer(c),
-            ConstraintToken::CMintDecimals(c) => self.add_cmint_decimals(c),
-            ConstraintToken::CMintSigner(c) => self.add_cmint_signer(c),
-            ConstraintToken::CMintSignerSeeds(c) => self.add_cmint_signer_seeds(c),
-            ConstraintToken::CMintSignerBump(c) => self.add_cmint_signer_bump(c),
-            ConstraintToken::CMintProgramAuthoritySeeds(c) => self.add_cmint_program_authority_seeds(c),
-            ConstraintToken::CMintProgramAuthorityBump(c) => self.add_cmint_program_authority_bump(c),
-            ConstraintToken::CMintAddressTreeInfo(c) => self.add_cmint_address_tree_info(c),
-            ConstraintToken::CMintProof(c) => self.add_cmint_proof(c),
-            ConstraintToken::CMintOutputStateTreeIndex(c) => self.add_cmint_output_state_tree_index(c),
+            ConstraintToken::CTokenMintAuthority(c) => self.add_ctoken_mint_authority(c),
+            ConstraintToken::CTokenMintFreezeAuthority(c) => self.add_ctoken_mint_freeze_authority(c),
+            ConstraintToken::CTokenMintPayer(c) => self.add_ctoken_mint_payer(c),
+            ConstraintToken::CTokenMintDecimals(c) => self.add_ctoken_mint_decimals(c),
+            ConstraintToken::CTokenMintSigner(c) => self.add_ctoken_mint_signer(c),
+            ConstraintToken::CTokenMintSignerSeeds(c) => self.add_ctoken_mint_signer_seeds(c),
+            ConstraintToken::CTokenMintSignerBump(c) => self.add_ctoken_mint_signer_bump(c),
+            ConstraintToken::CTokenMintProgramAuthoritySeeds(c) => self.add_ctoken_mint_program_authority_seeds(c),
+            ConstraintToken::CTokenMintProgramAuthorityBump(c) => self.add_ctoken_mint_program_authority_bump(c),
+            ConstraintToken::CTokenMintAddressTreeInfo(c) => self.add_ctoken_mint_address_tree_info(c),
+            ConstraintToken::CTokenMintProof(c) => self.add_ctoken_mint_proof(c),
+            ConstraintToken::CTokenMintOutputStateTreeIndex(c) => self.add_ctoken_mint_output_state_tree_index(c),
+            ConstraintToken::MetadataName(c) => self.add_metadata_name(c),
+            ConstraintToken::MetadataSymbol(c) => self.add_metadata_symbol(c),
+            ConstraintToken::MetadataUri(c) => self.add_metadata_uri(c),
+            ConstraintToken::MetadataUpdateAuthority(c) => self.add_metadata_update_authority(c),
+            ConstraintToken::MetadataAdditional(c) => self.add_metadata_additional(c),
             ConstraintToken::CPDAAuthority(c) => self.add_cpda_authority(c),
             ConstraintToken::CPDAAddressTreeInfo(c) => self.add_cpda_address_tree_info(c),
             ConstraintToken::CPDAProof(c) => self.add_cpda_proof(c),
@@ -1957,107 +2019,139 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
         Ok(())
     }
 
-    fn add_cmint_authority(&mut self, c: Context<ConstraintCMintAuthority>) -> ParseResult<()> {
-        if self.cmint_authority.is_some() {
-            return Err(ParseError::new(c.span(), "cmint authority already provided"));
+    fn add_ctoken_mint_authority(&mut self, c: Context<ConstraintCTokenMintAuthority>) -> ParseResult<()> {
+        if self.ctoken_mint_authority.is_some() {
+            return Err(ParseError::new(c.span(), "mint::authority already provided"));
         }
-        self.cmint_authority.replace(c);
+        self.ctoken_mint_authority.replace(c);
         Ok(())
     }
 
-    fn add_cmint_mint_authority(&mut self, c: Context<ConstraintCMintMintAuthority>) -> ParseResult<()> {
-        if self.cmint_mint_authority.is_some() {
-            return Err(ParseError::new(c.span(), "cmint mint_authority already provided"));
+    fn add_ctoken_mint_freeze_authority(&mut self, c: Context<ConstraintCTokenMintFreezeAuthority>) -> ParseResult<()> {
+        if self.ctoken_mint_freeze_authority.is_some() {
+            return Err(ParseError::new(c.span(), "mint::freeze_authority already provided"));
         }
-        self.cmint_mint_authority.replace(c);
+        self.ctoken_mint_freeze_authority.replace(c);
         Ok(())
     }
 
-    fn add_cmint_freeze_authority(&mut self, c: Context<ConstraintCMintFreezeAuthority>) -> ParseResult<()> {
-        if self.cmint_freeze_authority.is_some() {
-            return Err(ParseError::new(c.span(), "cmint freeze_authority already provided"));
+    fn add_ctoken_mint_payer(&mut self, c: Context<ConstraintCTokenMintPayer>) -> ParseResult<()> {
+        if self.ctoken_mint_payer.is_some() {
+            return Err(ParseError::new(c.span(), "mint::payer already provided"));
         }
-        self.cmint_freeze_authority.replace(c);
+        self.ctoken_mint_payer.replace(c);
         Ok(())
     }
 
-    fn add_cmint_payer(&mut self, c: Context<ConstraintCMintPayer>) -> ParseResult<()> {
-        if self.cmint_payer.is_some() {
-            return Err(ParseError::new(c.span(), "cmint payer already provided"));
+    fn add_ctoken_mint_decimals(&mut self, c: Context<ConstraintCTokenMintDecimals>) -> ParseResult<()> {
+        if self.ctoken_mint_decimals.is_some() {
+            return Err(ParseError::new(c.span(), "mint::decimals already provided"));
         }
-        self.cmint_payer.replace(c);
+        self.ctoken_mint_decimals.replace(c);
         Ok(())
     }
 
-    fn add_cmint_decimals(&mut self, c: Context<ConstraintCMintDecimals>) -> ParseResult<()> {
-        if self.cmint_decimals.is_some() {
-            return Err(ParseError::new(c.span(), "cmint decimals already provided"));
+    fn add_ctoken_mint_signer(&mut self, c: Context<ConstraintCTokenMintSigner>) -> ParseResult<()> {
+        if self.ctoken_mint_signer.is_some() {
+            return Err(ParseError::new(c.span(), "mint::mint_signer already provided"));
         }
-        self.cmint_decimals.replace(c);
+        self.ctoken_mint_signer.replace(c);
         Ok(())
     }
 
-    fn add_cmint_signer(&mut self, c: Context<ConstraintCMintSigner>) -> ParseResult<()> {
-        if self.cmint_signer.is_some() {
-            return Err(ParseError::new(c.span(), "cmint signer already provided"));
+    fn add_ctoken_mint_signer_seeds(&mut self, c: Context<ConstraintCTokenMintSignerSeeds>) -> ParseResult<()> {
+        if self.ctoken_mint_signer_seeds.is_some() {
+            return Err(ParseError::new(c.span(), "mint::mint_signer_seeds already provided"));
         }
-        self.cmint_signer.replace(c);
+        self.ctoken_mint_signer_seeds.replace(c);
         Ok(())
     }
 
-    fn add_cmint_signer_seeds(&mut self, c: Context<ConstraintCMintSignerSeeds>) -> ParseResult<()> {
-        if self.cmint_signer_seeds.is_some() {
-            return Err(ParseError::new(c.span(), "cmint mint_signer_seeds already provided"));
+    fn add_ctoken_mint_signer_bump(&mut self, c: Context<ConstraintCTokenMintSignerBump>) -> ParseResult<()> {
+        if self.ctoken_mint_signer_bump.is_some() {
+            return Err(ParseError::new(c.span(), "mint::mint_signer_bump already provided"));
         }
-        self.cmint_signer_seeds.replace(c);
+        self.ctoken_mint_signer_bump.replace(c);
         Ok(())
     }
 
-    fn add_cmint_signer_bump(&mut self, c: Context<ConstraintCMintSignerBump>) -> ParseResult<()> {
-        if self.cmint_signer_bump.is_some() {
-            return Err(ParseError::new(c.span(), "cmint mint_signer_bump already provided"));
+    fn add_ctoken_mint_program_authority_seeds(&mut self, c: Context<ConstraintCTokenMintProgramAuthoritySeeds>) -> ParseResult<()> {
+        if self.ctoken_mint_program_authority_seeds.is_some() {
+            return Err(ParseError::new(c.span(), "mint::program_authority_seeds already provided"));
         }
-        self.cmint_signer_bump.replace(c);
+        self.ctoken_mint_program_authority_seeds.replace(c);
         Ok(())
     }
 
-    fn add_cmint_program_authority_seeds(&mut self, c: Context<ConstraintCMintProgramAuthoritySeeds>) -> ParseResult<()> {
-        if self.cmint_program_authority_seeds.is_some() {
-            return Err(ParseError::new(c.span(), "cmint program_authority_seeds already provided"));
+    fn add_ctoken_mint_program_authority_bump(&mut self, c: Context<ConstraintCTokenMintProgramAuthorityBump>) -> ParseResult<()> {
+        if self.ctoken_mint_program_authority_bump.is_some() {
+            return Err(ParseError::new(c.span(), "mint::program_authority_bump already provided"));
         }
-        self.cmint_program_authority_seeds.replace(c);
+        self.ctoken_mint_program_authority_bump.replace(c);
         Ok(())
     }
 
-    fn add_cmint_program_authority_bump(&mut self, c: Context<ConstraintCMintProgramAuthorityBump>) -> ParseResult<()> {
-        if self.cmint_program_authority_bump.is_some() {
-            return Err(ParseError::new(c.span(), "cmint program_authority_bump already provided"));
+    fn add_ctoken_mint_address_tree_info(&mut self, c: Context<ConstraintCTokenMintAddressTreeInfo>) -> ParseResult<()> {
+        if self.ctoken_mint_address_tree_info.is_some() {
+            return Err(ParseError::new(c.span(), "mint::address_tree_info already provided"));
         }
-        self.cmint_program_authority_bump.replace(c);
+        self.ctoken_mint_address_tree_info.replace(c);
         Ok(())
     }
 
-    fn add_cmint_address_tree_info(&mut self, c: Context<ConstraintCMintAddressTreeInfo>) -> ParseResult<()> {
-        if self.cmint_address_tree_info.is_some() {
-            return Err(ParseError::new(c.span(), "cmint address_tree_info already provided"));
+    fn add_ctoken_mint_proof(&mut self, c: Context<ConstraintCTokenMintProof>) -> ParseResult<()> {
+        if self.ctoken_mint_proof.is_some() {
+            return Err(ParseError::new(c.span(), "mint::proof already provided"));
         }
-        self.cmint_address_tree_info.replace(c);
+        self.ctoken_mint_proof.replace(c);
         Ok(())
     }
 
-    fn add_cmint_proof(&mut self, c: Context<ConstraintCMintProof>) -> ParseResult<()> {
-        if self.cmint_proof.is_some() {
-            return Err(ParseError::new(c.span(), "cmint proof already provided"));
+    fn add_ctoken_mint_output_state_tree_index(&mut self, c: Context<ConstraintCTokenMintOutputStateTreeIndex>) -> ParseResult<()> {
+        if self.ctoken_mint_output_state_tree_index.is_some() {
+            return Err(ParseError::new(c.span(), "mint::output_state_tree_index already provided"));
         }
-        self.cmint_proof.replace(c);
+        self.ctoken_mint_output_state_tree_index.replace(c);
         Ok(())
     }
 
-    fn add_cmint_output_state_tree_index(&mut self, c: Context<ConstraintCMintOutputStateTreeIndex>) -> ParseResult<()> {
-        if self.cmint_output_state_tree_index.is_some() {
-            return Err(ParseError::new(c.span(), "cmint output_state_tree_index already provided"));
+    fn add_metadata_name(&mut self, c: Context<ConstraintMetadataName>) -> ParseResult<()> {
+        if self.metadata_name.is_some() {
+            return Err(ParseError::new(c.span(), "metadata::name already provided"));
         }
-        self.cmint_output_state_tree_index.replace(c);
+        self.metadata_name.replace(c);
+        Ok(())
+    }
+
+    fn add_metadata_symbol(&mut self, c: Context<ConstraintMetadataSymbol>) -> ParseResult<()> {
+        if self.metadata_symbol.is_some() {
+            return Err(ParseError::new(c.span(), "metadata::symbol already provided"));
+        }
+        self.metadata_symbol.replace(c);
+        Ok(())
+    }
+
+    fn add_metadata_uri(&mut self, c: Context<ConstraintMetadataUri>) -> ParseResult<()> {
+        if self.metadata_uri.is_some() {
+            return Err(ParseError::new(c.span(), "metadata::uri already provided"));
+        }
+        self.metadata_uri.replace(c);
+        Ok(())
+    }
+
+    fn add_metadata_update_authority(&mut self, c: Context<ConstraintMetadataUpdateAuthority>) -> ParseResult<()> {
+        if self.metadata_update_authority.is_some() {
+            return Err(ParseError::new(c.span(), "metadata::update_authority already provided"));
+        }
+        self.metadata_update_authority.replace(c);
+        Ok(())
+    }
+
+    fn add_metadata_additional(&mut self, c: Context<ConstraintMetadataAdditional>) -> ParseResult<()> {
+        if self.metadata_additional.is_some() {
+            return Err(ParseError::new(c.span(), "metadata::additional already provided"));
+        }
+        self.metadata_additional.replace(c);
         Ok(())
     }
 
@@ -2338,4 +2432,52 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
         self.extension_permanent_delegate.replace(c);
         Ok(())
     }
+}
+
+/// Validates that metadata field expressions have appropriate size limits at compile time.
+/// This function checks if the expression is a string literal and validates its length.
+fn validate_metadata_size_limit(
+    expr: &Expr,
+    field_name: &str,
+    max_bytes: usize,
+    span: proc_macro2::Span,
+) -> ParseResult<()> {
+    match expr {
+        // Check string literals
+        Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(lit_str), .. }) => {
+            let str_value = lit_str.value();
+            let byte_len = str_value.len();
+            
+            if byte_len > max_bytes {
+                return Err(ParseError::new(
+                    span,
+                    format!(
+                        "CMint metadata {} exceeds size limit: {} bytes (max: {} bytes).",
+                        field_name, byte_len, max_bytes
+                    )
+                ));
+            }
+        }
+        // Check byte string literals
+        Expr::Lit(syn::ExprLit { lit: syn::Lit::ByteStr(lit_bytes), .. }) => {
+            let byte_len = lit_bytes.value().len();
+            
+            if byte_len > max_bytes {
+                return Err(ParseError::new(
+                    span,
+                    format!(
+                        "CMint metadata {} exceeds size limit: {} bytes (max: {} bytes).", field_name, byte_len, max_bytes
+                    )
+                ));
+            }
+        }
+        // For other expressions (variables, function calls, etc.), we can't validate at compile time
+        // The runtime validation will be handled in the generated code
+        _ => {
+            // No compile-time validation possible for dynamic expressions
+            // Runtime validation will be added in the generated code
+        }
+    }
+    
+    Ok(())
 }

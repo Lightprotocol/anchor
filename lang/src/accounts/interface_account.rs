@@ -237,6 +237,43 @@ impl<'a, T: AccountSerialize + AccountDeserialize + CheckOwner + Clone> Interfac
         let mut data: &[u8] = &info.try_borrow_data()?;
         Ok(Self::new(info, T::try_deserialize_unchecked(&mut data)?))
     }
+
+    /// Creates an `InterfaceAccount` for CToken compressed accounts without deserializing.
+    /// This is used when the account data is compressed off-chain.
+    /// Verifies the account is NOT initialized on-chain (CToken mints don't exist on-chain).
+    #[inline(never)]
+    pub fn try_from_ctoken(info: &'a AccountInfo<'a>) -> Result<Self> 
+    where
+        T: Default,
+    {
+
+        if info.owner != &system_program::ID {
+            return Err(ErrorCode::AccountOwnedByWrongProgram.into());
+        }
+        
+        let data = info.try_borrow_data()?;
+        if data.len() != 0 {
+            return Err(ErrorCode::AccountOwnedByWrongProgram.into());
+        }
+        
+        
+        Ok(Self::new(info, T::default()))
+    }
+
+    /// Deserializes based on runtime token_program value.
+    /// If token_program is CTOKEN_ID, treats as CToken (uninitialized).
+    /// Otherwise, deserializes as regular SPL/Token2022 mint.
+    #[inline(never)]
+    pub fn try_from_with_token_program(info: &'a AccountInfo<'a>, token_program: &Pubkey) -> Result<Self> 
+    where
+        T: Default,
+    {
+        if token_program == &crate::CTOKEN_ID {
+            Self::try_from_ctoken(info)
+        } else {
+            Self::try_from(info)
+        }
+    }
 }
 
 impl<'info, B, T: AccountSerialize + AccountDeserialize + CheckOwner + Clone> Accounts<'info, B>
@@ -310,16 +347,40 @@ impl<T: AccountSerialize + AccountDeserialize + Clone> AsRef<T> for InterfaceAcc
     }
 }
 
-impl<T: AccountSerialize + AccountDeserialize + Clone> Deref for InterfaceAccount<'_, T> {
+impl<T: AccountSerialize + AccountDeserialize + Clone + 'static> Deref for InterfaceAccount<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
+        // Special check for Mint types with CToken program
+        #[cfg(feature = "spl-token")]
+        {
+            use std::any::TypeId;
+            // Check if T is Mint and this is a CToken mint (uninitialized account)
+            if TypeId::of::<T>() == TypeId::of::<anchor_spl::token_interface::Mint>() {
+                // CToken mints have owner = system_program (since they're uninitialized)
+                if self.account.info.owner == &system_program::ID {
+                    panic!("Cannot access mint data for CToken accounts - data is compressed off-chain! Only use the account's pubkey.");
+                }
+            }
+        }
         self.account.deref()
     }
 }
 
-impl<T: AccountSerialize + AccountDeserialize + Clone> DerefMut for InterfaceAccount<'_, T> {
+impl<T: AccountSerialize + AccountDeserialize + Clone + 'static> DerefMut for InterfaceAccount<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // Special check for Mint types with CToken program
+        #[cfg(feature = "spl-token")]
+        {
+            use std::any::TypeId;
+            // Check if T is Mint and this is a CToken mint (uninitialized account)
+            if TypeId::of::<T>() == TypeId::of::<anchor_spl::token_interface::Mint>() {
+                // CToken mints have owner = system_program (since they're uninitialized)
+                if self.account.info.owner == &system_program::ID {
+                    panic!("Cannot mutate mint data for CToken accounts - data is compressed off-chain!");
+                }
+            }
+        }
         self.account.deref_mut()
     }
 }
