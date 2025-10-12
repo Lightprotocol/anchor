@@ -34,6 +34,93 @@ import {
   MethodsFn,
 } from "./types.js";
 import { ViewFn } from "./views.js";
+import { createRpc, type Rpc } from "@lightprotocol/stateless.js";
+import {
+  buildDecompressParams,
+  getAccountInterface,
+} from "@lightprotocol/compressed-token";
+
+/**
+ * Check if an IDL type has compression_info field (is compressible)
+ */
+function isCompressibleType(typeName: string, idlTypes: IdlTypeDef[]): boolean {
+  const type = idlTypes.find((t) => t.name === typeName);
+  if (!type) return false;
+
+  if (type.type.kind === "struct") {
+    return (
+      type.type.fields?.some(
+        (f) => f.name === "compression_info" || f.name === "compressionInfo"
+      ) ?? false
+    );
+  }
+
+  // For enums, check if any variant has compression_info
+  if (type.type.kind === "enum") {
+    return (
+      type.type.variants?.some((v) =>
+        v.fields?.some(
+          (f) =>
+            (f as any).name === "compression_info" ||
+            (f as any).name === "compressionInfo"
+        )
+      ) ?? false
+    );
+  }
+
+  return false;
+}
+
+/**
+ * Get the defined type name from an account
+ */
+function getDefinedTypeName(account: IdlInstructionAccountItem): string | null {
+  if (!("type" in account)) return null;
+  const accType: any = (account as any).type;
+  if (accType && typeof accType === "object" && "defined" in accType) {
+    const defined: any = accType.defined;
+    if (typeof defined === "string") return defined;
+    if (defined && typeof defined === "object" && "name" in defined)
+      return defined.name as string;
+  }
+  return null;
+}
+
+/**
+ * Detect if type is CTokenData by checking if it's an enum with token-like variants
+ */
+function isCTokenDataType(typeName: string, idlTypes: IdlTypeDef[]): boolean {
+  const type = idlTypes.find((t) => t.name === typeName);
+  if (!type || type.type.kind !== "enum") return false;
+
+  // Check if it has typical cToken variant names
+  const variants = type.type.variants?.map((v) => v.name.toLowerCase()) ?? [];
+  const tokenKeywords = ["vault", "token", "account", "mint"];
+  return variants.some((v) => tokenKeywords.some((kw) => v.includes(kw)));
+}
+
+/**
+ * Extract enum variant from account name for CTokenData
+ * e.g., "lpVault" -> "lpVault", "token0Vault" -> "token0Vault"
+ */
+function extractTokenVariant(
+  accountName: string,
+  typeName: string,
+  idlTypes: IdlTypeDef[]
+): string | undefined {
+  const type = idlTypes.find((t) => t.name === typeName);
+  if (!type || type.type.kind !== "enum") return undefined;
+
+  // Try to match account name to variant name (case-insensitive)
+  const variants = type.type.variants ?? [];
+  const matchedVariant = variants.find(
+    (v) =>
+      accountName.toLowerCase().includes(v.name.toLowerCase()) ||
+      v.name.toLowerCase().includes(accountName.toLowerCase())
+  );
+
+  return matchedVariant?.name;
+}
 
 export type MethodsNamespace<
   IDL extends Idl = Idl,
@@ -164,6 +251,7 @@ export class MethodsBuilder<
   private _postInstructions: Array<TransactionInstruction> = [];
   private _accountsResolver: AccountsResolver<IDL>;
   private _resolveAccounts: boolean = true;
+  private _enableAutoDecompress: boolean = false;
 
   constructor(
     private _args: Array<any>,
@@ -295,6 +383,30 @@ export class MethodsBuilder<
   }
 
   /**
+   * Enable automatic decompression for all compressible accounts.
+   *
+   * Automatically detects compressible accounts from IDL, fetches their data,
+   * and injects decompress instructions if any are compressed.
+   *
+   * No configuration required - everything is derived from the IDL!
+   *
+   * @returns this builder for chaining
+   *
+   * @example
+   * ```ts
+   * await program.methods
+   *   .swap(amount)
+   *   .decompressIfNeeded()  // That's it!
+   *   .accounts({ poolState, lpVault, token0Vault, ... })
+   *   .rpc();
+   * ```
+   */
+  public decompressIfNeeded() {
+    this._enableAutoDecompress = true;
+    return this;
+  }
+
+  /**
    * Get the public keys of the instruction accounts.
    *
    * The return type is an object with account names as keys and their public
@@ -314,6 +426,151 @@ export class MethodsBuilder<
   }
 
   /**
+   * Automatically detect and fetch compressible accounts based on IDL.
+   * Returns account inputs for buildDecompressParams.
+   */
+  private async _detectAndFetchCompressibleAccounts(): Promise<any[]> {
+    const idlIx = this._accountsResolver["_idlIx"];
+    const idlTypes = this._accountsResolver["_idlTypes"];
+    const provider = this._accountsResolver["_provider"] as Provider & {
+      rpc?: any;
+    };
+
+    // Find all compressible account definitions from IDL
+    const compressibleAccounts: Array<{
+      name: string;
+      address: PublicKey;
+      typeName: string;
+      isCToken: boolean;
+      variant?: string;
+    }> = [];
+
+    // Recursively process accounts (handles nested account structures)
+    const processAccounts = (
+      accounts: readonly IdlInstructionAccountItem[]
+    ) => {
+      for (const account of accounts) {
+        if ("accounts" in account) {
+          // Nested accounts struct
+          processAccounts(account.accounts);
+          continue;
+        }
+
+        const typeName = getDefinedTypeName(account);
+        if (!typeName) continue;
+
+        // Check if this type is compressible
+        if (!isCompressibleType(typeName, idlTypes)) continue;
+
+        const address = translateAddress(
+          this._accounts[account.name] as Address
+        );
+        if (!address) {
+          console.warn(
+            `Compressible account ${account.name} not found in accounts`
+          );
+          continue;
+        }
+
+        const isCToken = isCTokenDataType(typeName, idlTypes);
+        const variant = isCToken
+          ? extractTokenVariant(account.name, typeName, idlTypes)
+          : undefined;
+
+        compressibleAccounts.push({
+          name: account.name,
+          address,
+          typeName,
+          isCToken,
+          variant,
+        });
+      }
+    };
+
+    processAccounts(idlIx.accounts);
+
+    if (compressibleAccounts.length === 0) {
+      return [];
+    }
+
+    // Ensure Rpc instance (lightprotocol) is available
+    let rpc: Rpc = (provider as any).rpc;
+    if (!rpc) {
+      rpc = createRpc(provider.connection);
+      (provider as any).rpc = rpc;
+    }
+
+    // Batch fetch all compressible accounts in parallel
+
+    const fetchPromises = compressibleAccounts.map(async (acc) => {
+      try {
+        const info = await getAccountInterface(rpc, acc.address);
+
+        return {
+          address: acc.address,
+          info: {
+            accountInfo: info.accountInfo,
+            parsed: info.parsed,
+            merkleContext: info.merkleContext,
+          },
+          accountType: acc.isCToken ? "cTokenData" : acc.typeName,
+          tokenVariant: acc.variant,
+        };
+      } catch (err) {
+        console.warn(`Failed to fetch compressible account ${acc.name}:`, err);
+        return null;
+      }
+    });
+
+    const results = await Promise.all(fetchPromises);
+    return results.filter((r) => r !== null);
+  }
+
+  /**
+   * Internal method to inject decompress instruction if needed.
+   * Fully automatic based on IDL analysis.
+   */
+  private async _injectDecompressIfNeeded(): Promise<void> {
+    if (!this._enableAutoDecompress) return;
+
+    // Detect and fetch compressible accounts
+    const accountInputs = await this._detectAndFetchCompressibleAccounts();
+
+    if (accountInputs.length === 0) return;
+
+    const programId = this._accountsResolver["_programId"];
+    const provider = this._accountsResolver["_provider"] as Provider & {
+      rpc?: Rpc;
+    };
+    // Prefer a cached Rpc on provider; otherwise construct one from the Connection endpoint
+    let rpc: Rpc = provider.rpc!;
+    if (!rpc) {
+      rpc = createRpc(provider.connection);
+      (provider as any).rpc = rpc;
+    }
+
+    // Build decompress params using the helper
+    const params = await buildDecompressParams(programId, rpc, accountInputs);
+
+    if (!params) return; // No compressed accounts
+
+    // Use Anchor's own instruction builder to create decompressAccountsIdempotent
+    // This instruction exists in the IDL (generated by the proc macro)
+    const decompressIx = await this._ixFn["decompressAccountsIdempotent"](
+      params.proofOption,
+      params.compressedAccounts,
+      params.systemAccountsOffset,
+      {
+        accounts: this._accounts,
+        remainingAccounts: params.remainingAccounts,
+      }
+    );
+
+    // Prepend decompress instruction
+    this.preInstructions([decompressIx], true);
+  }
+
+  /**
    * Create an instruction based on the current configuration.
    *
    * See {@link transaction} to create a transaction instead.
@@ -324,6 +581,9 @@ export class MethodsBuilder<
     if (this._resolveAccounts) {
       await this._accountsResolver.resolve();
     }
+
+    // Inject decompress if configured
+    await this._injectDecompressIfNeeded();
 
     // @ts-ignore
     return this._ixFn(...this._args, {
@@ -349,6 +609,9 @@ export class MethodsBuilder<
     if (this._resolveAccounts) {
       await this._accountsResolver.resolve();
     }
+
+    // Inject decompress if configured
+    await this._injectDecompressIfNeeded();
 
     // @ts-ignore
     return this._txFn(...this._args, {
@@ -429,6 +692,9 @@ export class MethodsBuilder<
     if (this._resolveAccounts) {
       await this._accountsResolver.resolve();
     }
+
+    // Inject decompress if configured
+    await this._injectDecompressIfNeeded();
 
     // @ts-ignore
     return this._rpcFn(...this._args, {
