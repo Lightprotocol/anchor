@@ -710,6 +710,7 @@ pub struct ConstraintGroup {
     // Compressed constraints
     pub cmint: Option<ConstraintCTokenMintGroup>,
     pub cpda: Option<ConstraintCPDAGroup>,
+    pub cctoken: Option<ConstraintCCTokenGroup>,
 }
 
 impl ConstraintGroup {
@@ -828,6 +829,8 @@ pub enum ConstraintToken {
     CPDAProof(Context<ConstraintCPDAProof>),
     CPDAOutputStateTreeIndex(Context<ConstraintCPDAOutputStateTreeIndex>),
     CPDACompressOnInit(Context<ConstraintCPDACompressOnInit>),
+    // CCToken constraint
+    CCToken(Context<ConstraintCCToken>),
 }
 
 impl Parse for ConstraintToken {
@@ -1245,6 +1248,16 @@ pub struct ConstraintCPDAOutputStateTreeIndex {
 
 #[derive(Debug, Clone)]
 pub struct ConstraintCPDACompressOnInit {}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCCTokenGroup {
+    pub mint: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCCToken {
+    pub mint: Option<Expr>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ConstraintTokenBump {

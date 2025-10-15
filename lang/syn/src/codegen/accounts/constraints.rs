@@ -88,6 +88,7 @@ pub fn linearize(c_group: &ConstraintGroup) -> Vec<Constraint> {
         realloc,
         cmint: _,
         cpda: _,
+        cctoken: _,
     } = c_group.clone();
 
     let mut constraints = Vec::new();

@@ -445,6 +445,15 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
                     ConstraintCPDACompressOnInit {},
                 ))
             }
+            "cctoken" => {
+                // Marks this account as a compressible compressed-token account
+                ConstraintToken::CCToken(Context::new(
+                    ident.span(),
+                    ConstraintCCToken {
+                        mint: None,
+                    },
+                ))
+            }
             "metadata" => {
             stream.parse::<Token![:]>()?;
             stream.parse::<Token![:]>()?;
@@ -779,6 +788,8 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub cpda_proof: Option<Context<ConstraintCPDAProof>>,
     pub cpda_output_state_tree_index: Option<Context<ConstraintCPDAOutputStateTreeIndex>>,
     pub cpda_compress_on_init: Option<Context<ConstraintCPDACompressOnInit>>,
+    // CCToken constraint
+    pub cctoken: Option<Context<ConstraintCCToken>>,
 }
 
 impl<'ty> ConstraintGroupBuilder<'ty> {
@@ -848,6 +859,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cpda_proof: None,
             cpda_output_state_tree_index: None,
             cpda_compress_on_init: None,
+            cctoken: None,
         }
     }
     
@@ -1295,6 +1307,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cpda_proof,
             cpda_output_state_tree_index,
             cpda_compress_on_init,
+            cctoken,
         } = self;
 
         // Converts Option<Context<T>> -> Option<T>.
@@ -1573,6 +1586,9 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             } else {
                 None
             },
+            cctoken: cctoken.map(|c| ConstraintCCTokenGroup {
+                mint: c.into_inner().mint,
+            }),
         })
     }
 
@@ -1658,6 +1674,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ConstraintToken::CPDAProof(c) => self.add_cpda_proof(c),
             ConstraintToken::CPDAOutputStateTreeIndex(c) => self.add_cpda_output_state_tree_index(c),
             ConstraintToken::CPDACompressOnInit(c) => self.add_cpda_compress_on_init(c),
+            ConstraintToken::CCToken(c) => self.add_cctoken(c),
         }
     }
 
@@ -2192,6 +2209,14 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             return Err(ParseError::new(c.span(), "compress_on_init already provided"));
         }
         self.cpda_compress_on_init.replace(c);
+        Ok(())
+    }
+
+    fn add_cctoken(&mut self, c: Context<ConstraintCCToken>) -> ParseResult<()> {
+        if self.cctoken.is_some() {
+            return Err(ParseError::new(c.span(), "cctoken already provided"));
+        }
+        self.cctoken.replace(c);
         Ok(())
     }
 
