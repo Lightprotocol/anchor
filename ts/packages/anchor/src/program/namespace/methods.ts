@@ -669,20 +669,39 @@ export class MethodsBuilder<
       "ctokenCompressionAuthority",
     ]);
 
-    // Collect accounts to check for compression
+    // Collect potentially compressible accounts in deterministic order
+    // Order: CPDA accounts first (poolState, observationState), then ctoken accounts (vaults)
+    // This is CRITICAL: buildDecompressParams is order-sensitive
     const accountsToCheck: Array<{ name: string; address: PublicKey }> = [];
+
+    // Determine compressible names by tags
+    const tags = scanCompressibleNames(this._idl);
+
+    // Separate CPDA and ctoken accounts for proper ordering
+    const cpdaAccounts: Array<{ name: string; address: PublicKey }> = [];
+    const ctokenAccounts: Array<{ name: string; address: PublicKey }> = [];
+
     for (const [name, addr] of Object.entries(this._decompressAccounts)) {
       if (SKIP_ACCOUNTS.has(name)) continue;
 
       try {
         const pubkey = translateAddress(addr as Address);
-        accountsToCheck.push({ name, address: pubkey });
+
+        // Sort by type: CPDAs first, then ctokens
+        if (tags.cpda.has(name)) {
+          cpdaAccounts.push({ name, address: pubkey });
+        } else if (tags.cctoken.has(name)) {
+          ctokenAccounts.push({ name, address: pubkey });
+        }
       } catch {
         console.warn(
           `[decompressIfNeeded] Invalid address for ${name}, skipping`
         );
       }
     }
+
+    // Concatenate: CPDAs first, then ctokens (matches SDK/reference ordering)
+    accountsToCheck.push(...cpdaAccounts, ...ctokenAccounts);
 
     // Fetch compression state for all accounts
     const accountInputs = await this._fetchCompressibleAccounts(
@@ -711,8 +730,6 @@ export class MethodsBuilder<
         accountType: ai.accountType,
         info: ai.info,
         tokenVariant: ai.tokenVariant || undefined,
-        hasMerkleContext: !!ai.info?.merkleContext,
-        hasParsed: !!ai.info?.parsed,
       }))
       // null,
       // 2
@@ -736,22 +753,6 @@ export class MethodsBuilder<
       `[decompressIfNeeded] systemAccountsOffset: ${params.systemAccountsOffset}`
     );
 
-    // Unwrap array-wrapped variant data (SDK packs as arrays, Anchor IDL expects structs)
-    const unwrappedCompressedAccounts = params.compressedAccounts.map(
-      (acc: any) => {
-        if (!acc?.data) return acc;
-
-        const unwrappedData: any = {};
-        for (const key in acc.data) {
-          const value = acc.data[key];
-          unwrappedData[key] =
-            Array.isArray(value) && value.length === 1 ? value[0] : value;
-        }
-
-        return { ...acc, data: unwrappedData };
-      }
-    );
-
     // Build the decompress instruction
     const decompressIxFn = this._allInstructionFns[
       "decompressAccountsIdempotent"
@@ -773,7 +774,7 @@ export class MethodsBuilder<
     try {
       decompressIx = decompressIxFn(
         params.proofOption,
-        unwrappedCompressedAccounts,
+        params.compressedAccounts,
         params.systemAccountsOffset,
         {
           accounts: this._decompressAccounts as Accounts<D>,
