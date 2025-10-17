@@ -438,11 +438,15 @@ export class MethodsBuilder<
   /**
    * Enable automatic decompression for compressible accounts.
    *
-   * Requires ALL accounts needed by decompressAccountsIdempotent instruction to be provided.
+   * System accounts (feePayer, config, etc.) are REQUIRED.
+   * Seed accounts (lpMint, ammConfig, etc.) are OPTIONAL - only provide them
+   * if their dependent compressible accounts are being decompressed.
+   *
    * Automatically infers account types and variants from IDL, fetches compression state,
    * and injects decompress instruction if needed.
    *
-   * @param accounts - All accounts for decompressAccountsIdempotent instruction.
+   * @param accounts - Accounts for decompressAccountsIdempotent instruction.
+   *                   System accounts required, seed accounts optional.
    * @returns this builder for chaining
    *
    * @example
@@ -450,6 +454,7 @@ export class MethodsBuilder<
    * await program.methods
    *   .swap(amount)
    *   .decompressIfNeeded({
+   *     // System accounts (required)
    *     feePayer: owner.publicKey,
    *     config: compressionConfig,
    *     rentPayer: owner.publicKey,
@@ -457,24 +462,25 @@ export class MethodsBuilder<
    *     ctokenProgram: CompressedTokenProgram.programId,
    *     ctokenCpiAuthority: CompressedTokenProgram.deriveCpiAuthorityPda,
    *     ctokenConfig,
-   *     ammConfig,
+   *     // Seed accounts (optional - only provide what's needed)
+   *     ammConfig,      // Only if poolState is compressed
+   *     token0Mint,     // Only if token0Vault is compressed
+   *     token1Mint,     // Only if token1Vault is compressed
+   *     // lpMint: omitted because lpVault not being decompressed
+   *     // Compressible accounts
    *     poolState,
-   *     token0Mint,
-   *     token1Mint,
-   *     lpMint,
    *     token0Vault,
    *     token1Vault,
-   *     lpVault,
    *   })
    *   .accounts({ ... })
    *   .rpc();
    * ```
    */
   public decompressIfNeeded(
-    accounts: Accounts<D> & { [name: string]: Address }
+    accounts: Partial<Accounts<D>> & { [name: string]: Address }
   ) {
     this._enableAutoDecompress = true;
-    this._decompressAccounts = flattenPartialAccounts(accounts as any, true);
+    this._decompressAccounts = flattenPartialAccounts(accounts as any, false);
     return this;
   }
 
@@ -765,9 +771,83 @@ export class MethodsBuilder<
       return;
     }
 
+    // Determine which seed accounts are required by the compressible accounts being decompressed
+    const requiredSeeds = new Set<string>();
+    for (const input of accountInputs) {
+      if (input.tokenVariant) {
+        // For CToken accounts, determine the required mint seed
+        // token0Vault → token0Mint, token1Vault → token1Mint, lpVault → lpMint
+        const variant = input.tokenVariant as string;
+        const mintSeed = variant.replace("Vault", "Mint");
+        requiredSeeds.add(mintSeed);
+        console.log(
+          `[decompressIfNeeded] Account '${variant}' is being decompressed, requires seed: '${mintSeed}'`
+        );
+      }
+      // For CPDA accounts, we could add more sophisticated logic here if needed
+      // For now, CPDA accounts like poolState, observationState typically don't have seed dependencies
+      // or their seeds are derived from other accounts already in the structure
+    }
+
+    // Validate that all required seeds are provided
+    const missingRequiredSeeds: string[] = [];
+    for (const seedName of requiredSeeds) {
+      if (!(seedName in this._decompressAccounts)) {
+        missingRequiredSeeds.push(seedName);
+      } else {
+        try {
+          const seedPubkey = translateAddress(
+            this._decompressAccounts[seedName] as Address
+          );
+          if (seedPubkey.equals(programId)) {
+            // Seed is set to program ID (not provided)
+            missingRequiredSeeds.push(seedName);
+          }
+        } catch {
+          missingRequiredSeeds.push(seedName);
+        }
+      }
+    }
+
+    if (missingRequiredSeeds.length > 0) {
+      const compressibleNames = accountInputs
+        .filter((ai) => ai.tokenVariant)
+        .map((ai) => ai.tokenVariant)
+        .join(", ");
+      throw new Error(
+        `[decompressIfNeeded] Cannot decompress accounts [${compressibleNames}] because required seed accounts are missing: ${missingRequiredSeeds.join(
+          ", "
+        )}.\n\n` +
+          `These seed accounts must be provided when decompressing their associated compressible accounts. ` +
+          `Please include them in the decompressIfNeeded() call.`
+      );
+    }
+
+    // Fill in any missing accounts with program ID (represents "None" for optional accounts)
+    // This ensures all accounts from the IDL are present, even if not used
+    // BUT we only auto-fill accounts that are NOT required by compressible accounts being decompressed
+    const completeAccounts = { ...this._decompressAccounts };
+    const decompressIxAccounts = decompressInstruction.accounts || [];
+
+    for (const acc of decompressIxAccounts) {
+      const accountName = typeof acc === "string" ? acc : acc.name;
+      if (!(accountName in completeAccounts)) {
+        if (requiredSeeds.has(accountName)) {
+          // This should have been caught above, but double-check
+          throw new Error(
+            `[decompressIfNeeded] Required seed account '${accountName}' is missing but needed for decompression.`
+          );
+        }
+        console.log(
+          `[decompressIfNeeded] Auto-filling optional account '${accountName}' with program ID (not needed for current decompression)`
+        );
+        completeAccounts[accountName] = programId;
+      }
+    }
+
     console.log(
       `[decompressIfNeeded] Building instruction with accounts:`,
-      Object.keys(this._decompressAccounts)
+      Object.keys(completeAccounts)
     );
 
     let decompressIx;
@@ -777,7 +857,7 @@ export class MethodsBuilder<
         params.compressedAccounts,
         params.systemAccountsOffset,
         {
-          accounts: this._decompressAccounts as Accounts<D>,
+          accounts: completeAccounts as Accounts<D>,
           remainingAccounts: params.remainingAccounts,
         }
       );
