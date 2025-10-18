@@ -89,6 +89,7 @@ pub fn linearize(c_group: &ConstraintGroup) -> Vec<Constraint> {
         cmint: _,
         cpda: _,
         cctoken: _,
+        compressible: _,
     } = c_group.clone();
 
     let mut constraints = Vec::new();
@@ -1596,14 +1597,14 @@ fn generate_constraint_mint(
         {
             // Check if this is a CToken mint
             #is_ctoken_check
-            
+
             #decimal_check
             #mint_authority_check
             #freeze_authority_check
-            
+
             // Check token_program ownership (system_program for CToken, token_program for SPL/T22)
             #token_program_check
-            
+
             // Skip extension checks for CToken mints
             if !__is_ctoken {
                 #group_pointer_authority_check

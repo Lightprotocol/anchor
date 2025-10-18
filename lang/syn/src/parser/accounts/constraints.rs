@@ -59,6 +59,9 @@ pub fn parse_token(stream: ParseStream) -> ParseResult<ConstraintToken> {
         "executable" => {
             ConstraintToken::Executable(Context::new(ident.span(), ConstraintExecutable {}))
         }
+        "compressible" => {
+            ConstraintToken::Compressible(Context::new(ident.span(), ConstraintCompressible {}))
+        }
         "mint" => {
             stream.parse::<Token![:]>()?;
             stream.parse::<Token![:]>()?;
@@ -790,6 +793,8 @@ pub struct ConstraintGroupBuilder<'ty> {
     pub cpda_compress_on_init: Option<Context<ConstraintCPDACompressOnInit>>,
     // CCToken constraint
     pub cctoken: Option<Context<ConstraintCCToken>>,
+    // Simple marker constraint for IDL generation
+    pub compressible: Option<Context<ConstraintCompressible>>,
 }
 
 impl<'ty> ConstraintGroupBuilder<'ty> {
@@ -860,6 +865,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cpda_output_state_tree_index: None,
             cpda_compress_on_init: None,
             cctoken: None,
+            compressible: None,
         }
     }
     
@@ -1308,6 +1314,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cpda_output_state_tree_index,
             cpda_compress_on_init,
             cctoken,
+            ref compressible,
         } = self;
 
         // Converts Option<Context<T>> -> Option<T>.
@@ -1589,6 +1596,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             cctoken: cctoken.map(|c| ConstraintCCTokenGroup {
                 mint: c.into_inner().mint,
             }),
+            compressible: compressible.as_ref().map(|c| c.clone().into_inner()),
         })
     }
 
@@ -1604,6 +1612,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             ConstraintToken::RentExempt(c) => self.add_rent_exempt(c),
             ConstraintToken::Seeds(c) => self.add_seeds(c),
             ConstraintToken::Executable(c) => self.add_executable(c),
+            ConstraintToken::Compressible(c) => self.add_compressible(c),
             ConstraintToken::Payer(c) => self.add_payer(c),
             ConstraintToken::Space(c) => self.add_space(c),
             ConstraintToken::Close(c) => self.add_close(c),
@@ -2284,6 +2293,14 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
             return Err(ParseError::new(c.span(), "executable already provided"));
         }
         self.executable.replace(c);
+        Ok(())
+    }
+
+    fn add_compressible(&mut self, c: Context<ConstraintCompressible>) -> ParseResult<()> {
+        if self.compressible.is_some() {
+            return Err(ParseError::new(c.span(), "compressible already provided"));
+        }
+        self.compressible.replace(c);
         Ok(())
     }
 

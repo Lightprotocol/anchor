@@ -711,6 +711,8 @@ pub struct ConstraintGroup {
     pub cmint: Option<ConstraintCTokenMintGroup>,
     pub cpda: Option<ConstraintCPDAGroup>,
     pub cctoken: Option<ConstraintCCTokenGroup>,
+    // Simple marker for IDL generation
+    pub compressible: Option<ConstraintCompressible>,
 }
 
 impl ConstraintGroup {
@@ -831,6 +833,8 @@ pub enum ConstraintToken {
     CPDACompressOnInit(Context<ConstraintCPDACompressOnInit>),
     // CCToken constraint
     CCToken(Context<ConstraintCCToken>),
+    // Simple marker constraint for IDL generation
+    Compressible(Context<ConstraintCompressible>),
 }
 
 impl Parse for ConstraintToken {
@@ -1258,6 +1262,9 @@ pub struct ConstraintCCTokenGroup {
 pub struct ConstraintCCToken {
     pub mint: Option<Expr>,
 }
+
+#[derive(Debug, Clone)]
+pub struct ConstraintCompressible {}
 
 #[derive(Debug, Clone)]
 pub struct ConstraintTokenBump {

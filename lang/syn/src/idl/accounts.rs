@@ -33,19 +33,18 @@ pub fn gen_idl_build_impl_accounts_struct(accounts: &AccountsStruct) -> TokenStr
                     _ => quote! { vec![] },
                 };
 
-                // Append compressibility tags to docs based on parsed constraints
-                let docs = {
-                    let mut d = docs;
+                // Detect compressibility from constraints
+                let compressible = {
+                    // Check explicit compressible marker
+                    let has_compressible_marker = acc.constraints.compressible.is_some();
+                    // Check initialization constraints (for init instructions)
                     let has_cpda = acc.constraints.cpda.is_some();
                     let has_cctoken = acc.constraints.cctoken.is_some();
-                    
-                    if has_cpda {
-                        d = quote! {{ let mut v = #d; v.push("cpda".into()); v }};
-                    }
-                    if has_cctoken {
-                        d = quote! {{ let mut v = #d; v.push("cctoken".into()); v }};
-                    }
-                    d
+                    let has_ctoken_in_docs = acc.docs.as_ref().map_or(false, |docs| {
+                        docs.iter().any(|d| d.to_lowercase().contains("ctoken"))
+                    });
+
+                    has_compressible_marker || has_cpda || has_cctoken || has_ctoken_in_docs
                 };
 
                 let (address, pda, relations) = if resolution {
@@ -88,6 +87,7 @@ pub fn gen_idl_build_impl_accounts_struct(accounts: &AccountsStruct) -> TokenStr
                             writable: #writable,
                             signer: #signer,
                             optional: #optional,
+                            compressible: #compressible,
                             address: #address,
                             pda: #pda,
                             relations: #relations,

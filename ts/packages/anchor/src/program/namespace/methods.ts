@@ -60,50 +60,6 @@ import {
 } from "@lightprotocol/compressed-token";
 
 featureFlags.version = VERSION.V2;
-/**
- * Infer account type and variant from IDL for compression.
- * Returns { accountType, tokenVariant? } based STRICTLY on IDL definitions.
- * NO FALLBACKS OR HEURISTICS - if not found in IDL, returns null.
- */
-function inferAccountTypeFromIDL(
-  accountName: string,
-  idl: Idl | undefined,
-  idlTypes: IdlTypeDef[]
-): { accountType: string; tokenVariant?: string } | null {
-  if (!idl) return null;
-
-  // 1. Check if it's a named program account in idl.accounts
-  const accountDef = idl.accounts?.find((acc) => acc.name === accountName);
-  if (accountDef) {
-    return { accountType: accountName };
-  }
-
-  // 2. Check if it matches a compressed token variant enum
-  // Look for the enum type that defines token variants (e.g., cTokenAccountVariant)
-  const compressedVariantType = idlTypes.find(
-    (t) =>
-      t.name.toLowerCase().includes("compressedaccountvariant") ||
-      t.name.toLowerCase().includes("ctokenaccountvariant") ||
-      t.name.toLowerCase().includes("tokenvariant")
-  );
-
-  if (compressedVariantType && compressedVariantType.type.kind === "enum") {
-    const variants = compressedVariantType.type.variants ?? [];
-    const matchedVariant = variants.find(
-      (v) => v.name.toLowerCase() === accountName.toLowerCase()
-    );
-
-    if (matchedVariant) {
-      return {
-        accountType: "cTokenData",
-        tokenVariant: matchedVariant.name,
-      };
-    }
-  }
-
-  // NOT FOUND IN IDL - return null (don't guess!)
-  return null;
-}
 
 export type MethodsNamespace<
   IDL extends Idl = Idl,
@@ -226,41 +182,6 @@ export function flattenPartialAccounts<A extends IdlInstructionAccountItem>(
   return toReturn;
 }
 
-// Scan the IDL for compressible accounts using explicit tags in account docs.
-// - "cpda" tag indicates a compressible program-derived account
-// - "cctoken" tag indicates a compressible token account (CompressedTokenProgram)
-function scanCompressibleNames(idl: Idl | undefined): {
-  cpda: Set<string>;
-  cctoken: Set<string>;
-} {
-  const cpda = new Set<string>();
-  const cctoken = new Set<string>();
-  if (!idl) return { cpda, cctoken };
-
-  const visitAccounts = (items: readonly IdlInstructionAccountItem[]) => {
-    for (const item of items) {
-      if ("accounts" in item) {
-        visitAccounts(item.accounts);
-        continue;
-      }
-      const acc = item as IdlInstructionAccount;
-      const docs = (acc.docs || []).map((d) => d.toLowerCase());
-      if (docs.some((d) => d.includes("cctoken"))) {
-        cctoken.add(acc.name);
-      }
-      if (docs.some((d) => d.includes("cpda"))) {
-        cpda.add(acc.name);
-      }
-    }
-  };
-
-  for (const ix of idl.instructions) {
-    visitAccounts(ix.accounts);
-  }
-
-  return { cpda, cctoken };
-}
-
 // Helper to extract decompress instruction accounts type
 type DecompressAccounts<IDL extends Idl> = Extract<
   AllInstructions<IDL>,
@@ -294,6 +215,7 @@ export class MethodsBuilder<
   private _enableAutoDecompress: boolean = false;
   private _decompressAccounts?: AccountsGeneric;
   private _idl?: IDL;
+  private _idlIx: AllInstructions<IDL>;
   private _idlTypes: IdlTypeDef[];
   private _allInstructionFns?: Record<string, InstructionFn<IDL>>;
   private _programId: PublicKey;
@@ -317,6 +239,7 @@ export class MethodsBuilder<
   ) {
     this._programId = programId;
     this._idl = idl;
+    this._idlIx = idlIx;
     this._idlTypes = idlTypes;
     this._allInstructionFns = allInstructionFns;
     this._accountNamespace = accountNamespace;
@@ -519,106 +442,97 @@ export class MethodsBuilder<
 
     const accountInputs: AccountInput[] = [];
 
-    // Determine compressible names by tags once
-    const tags = scanCompressibleNames(this._idl);
+    // Check each provided account to see if it's actually compressed
     for (const { name, address } of accountsToCheck) {
-      // Only consider accounts explicitly tagged in IDL
-      const isCpda = tags.cpda.has(name);
-      const isCCToken = tags.cctoken.has(name);
-      if (!isCpda && !isCCToken) {
-        console.log(
-          `[decompressIfNeeded] Skipping account '${name}' (no 'cpda' or 'cctoken' tag)`
+      try {
+        // Try fetching as CPDA first
+        // @ts-ignore
+        const cpdaResult = await rpc.getAccountInfoInterface(
+          address,
+          programId,
+          //@ts-ignore
+          defaultAddressTreeInfo
         );
-        continue;
-      }
 
-      // Try fetching as CPDA
-      // @ts-ignore
-      const cpdaResult = await rpc.getAccountInfoInterface(
-        address,
-        programId,
-        //@ts-ignore
-        defaultAddressTreeInfo
-      );
+        if (cpdaResult && cpdaResult.merkleContext && cpdaResult.isCompressed) {
+          // It's a compressed account
+          if (
+            cpdaResult.accountInfo.owner.equals(
+              CompressedTokenProgram.programId
+            )
+          ) {
+            // It's a compressed token account
+            try {
+              const parsed = parseTokenData(cpdaResult.accountInfo.data);
+              if (parsed) {
+                accountInputs.push({
+                  address,
+                  info: {
+                    accountInfo: cpdaResult.accountInfo,
+                    parsed,
+                    merkleContext: cpdaResult.merkleContext,
+                  },
+                  accountType: "cTokenData",
+                  tokenVariant: name,
+                });
+              }
+            } catch {
+              // Not a token account, ignore
+            }
+          } else {
+            // It's a compressed program account
+            let parsed = null;
+            const accountClient = (this._accountNamespace as any)[name];
+            if (accountClient?.coder) {
+              try {
+                parsed = accountClient.coder.accounts.decode(
+                  name,
+                  cpdaResult.accountInfo.data
+                );
+              } catch {
+                try {
+                  parsed = accountClient.coder.accounts.decodeAny(
+                    cpdaResult.accountInfo.data
+                  );
+                } catch {
+                  // Parsing failed, use null
+                }
+              }
+            }
 
-      if (cpdaResult && cpdaResult.merkleContext && cpdaResult.isCompressed) {
-        // It's a compressed CPDA
-        if (
-          isCCToken ||
-          cpdaResult.accountInfo.owner.equals(CompressedTokenProgram.programId)
-        ) {
-          // It's a compressed token account
+            accountInputs.push({
+              address,
+              info: {
+                accountInfo: cpdaResult.accountInfo,
+                parsed,
+                merkleContext: cpdaResult.merkleContext,
+              },
+              accountType: name, // cpda accountType equals the IDL account name
+            });
+          }
+        } else {
+          // Try as compressed token via getAccountInterface as fallback
           try {
-            const parsed = parseTokenData(cpdaResult.accountInfo.data);
-            if (parsed) {
+            const tokenRes = await getAccountInterface(
+              rpc,
+              address,
+              undefined,
+              CompressedTokenProgram.programId
+            );
+            if (tokenRes && (tokenRes as any).merkleContext) {
               accountInputs.push({
                 address,
-                info: {
-                  accountInfo: cpdaResult.accountInfo,
-                  parsed,
-                  merkleContext: cpdaResult.merkleContext,
-                },
+                info: tokenRes as any,
                 accountType: "cTokenData",
                 tokenVariant: name,
               });
             }
           } catch {
-            // Not a token account, ignore
+            // Not a compressed account
           }
-        } else {
-          // It's a compressed program account
-          let parsed = null;
-          const accountClient = (this._accountNamespace as any)[name];
-          if (accountClient?.coder) {
-            try {
-              parsed = accountClient.coder.accounts.decode(
-                name,
-                cpdaResult.accountInfo.data
-              );
-            } catch {
-              try {
-                parsed = accountClient.coder.accounts.decodeAny(
-                  cpdaResult.accountInfo.data
-                );
-              } catch {
-                // Parsing failed, use null
-              }
-            }
-          }
-
-          accountInputs.push({
-            address,
-            info: {
-              accountInfo: cpdaResult.accountInfo,
-              parsed,
-              merkleContext: cpdaResult.merkleContext,
-            },
-            accountType: name, // cpda accountType equals the IDL account name
-          });
         }
-        continue;
-      }
-
-      // Fallback: try as compressed token via getAccountInterface
-      if (isCCToken) {
-        try {
-          const tokenRes = await getAccountInterface(
-            rpc,
-            address,
-            undefined,
-            CompressedTokenProgram.programId
-          );
-          if (tokenRes && (tokenRes as any).merkleContext) {
-            accountInputs.push({
-              address,
-              info: tokenRes as any,
-              accountType: "cTokenData",
-              tokenVariant: name,
-            });
-          }
-        } catch {
-          // Not a compressed token
-        }
+      } catch {
+        // Account doesn't exist or can't be fetched, skip
       }
     }
 
@@ -656,6 +570,130 @@ export class MethodsBuilder<
       }
     }
     return null;
+  }
+
+  /**
+   * Extract required seed accounts based on what's actually being decompressed
+   */
+  private _extractRequiredSeeds(accountInputs: AccountInput[]): Set<string> {
+    const requiredSeeds = new Set<string>();
+
+    // Helper to extract seed account names from IDL PDA definition
+    const extractSeedsFromIdl = (accountName: string): string[] => {
+      if (!this._idl) return [];
+
+      const findAccount = (accounts: readonly any[], name: string): any => {
+        for (const acc of accounts) {
+          if ("accounts" in acc) {
+            const found = findAccount(acc.accounts, name);
+            if (found) return found;
+          } else if (acc.name === accountName) {
+            return acc;
+          }
+        }
+        return null;
+      };
+
+      // Search all instructions for PDA definition
+      for (const ix of this._idl.instructions) {
+        const accountDef = findAccount(ix.accounts, accountName);
+        if (accountDef && accountDef.pda && accountDef.pda.seeds) {
+          const seeds: string[] = [];
+          for (const seed of accountDef.pda.seeds) {
+            if (seed.kind === "account" && seed.path) {
+              const baseName = seed.path.split(".")[0].split("(")[0];
+              seeds.push(baseName);
+            }
+          }
+          return seeds;
+        }
+      }
+      return [];
+    };
+
+    // Analyze each account being decompressed
+    for (const input of accountInputs) {
+      const accountName = input.tokenVariant || (input.accountType as string);
+
+      // Extract seeds from IDL for this account
+      const seeds = extractSeedsFromIdl(accountName);
+      for (const seed of seeds) {
+        requiredSeeds.add(seed);
+        console.log(
+          `[decompressIfNeeded] Account '${accountName}' requires seed: '${seed}' (from IDL)`
+        );
+      }
+    }
+
+    return requiredSeeds;
+  }
+
+  /**
+   * Get compressible account names from main instruction's IDL definition
+   */
+  private _getMainInstructionCompressibleAccounts(): Set<string> {
+    const compressible = new Set<string>();
+    if (!this._idl) return compressible;
+
+    // Find the main instruction in IDL
+    const mainIx = this._idl.instructions.find(
+      (ix: any) => ix.name === (this._idlIx as any).name
+    );
+    if (!mainIx) return compressible;
+
+    // Recursively scan all accounts
+    const visitAccounts = (items: readonly any[]) => {
+      for (const item of items) {
+        if ("accounts" in item) {
+          visitAccounts(item.accounts);
+          continue;
+        }
+        // Check the compressible field
+        if (item.compressible === true) {
+          compressible.add(item.name);
+        }
+      }
+    };
+
+    visitAccounts(mainIx.accounts);
+    return compressible;
+  }
+
+  /**
+   * Auto-pull accounts from main instruction for matching names
+   */
+  private _autoPullFromMainInstruction(): void {
+    if (!this._decompressAccounts) return;
+
+    const programId = this._programId;
+
+    // Helper to check if an account is missing or set to program ID (placeholder)
+    const isAccountMissing = (name: string): boolean => {
+      if (!this._decompressAccounts || !(name in this._decompressAccounts))
+        return true;
+      try {
+        const pubkey = translateAddress(
+          this._decompressAccounts![name] as Address
+        );
+        return pubkey.equals(programId);
+      } catch {
+        return true;
+      }
+    };
+
+    // Try to pull each missing account from main instruction
+    for (const accountName in this._decompressAccounts) {
+      if (isAccountMissing(accountName)) {
+        const fromMain = this._getFromMainInstruction(accountName);
+        if (fromMain) {
+          console.log(
+            `[decompressIfNeeded] Auto-pulling '${accountName}' from main instruction:`,
+            fromMain.toBase58()
+          );
+          this._decompressAccounts[accountName] = fromMain;
+        }
+      }
+    }
   }
 
   /**
@@ -814,17 +852,9 @@ export class MethodsBuilder<
       "ctokenCompressionAuthority",
     ]);
 
-    // Collect potentially compressible accounts in deterministic order
-    // Order: CPDA accounts first (poolState, observationState), then ctoken accounts (vaults)
-    // This is CRITICAL: buildDecompressParams is order-sensitive
+    // Collect potentially compressible accounts
+    // Only check accounts that were explicitly provided (not set to programId placeholder)
     const accountsToCheck: Array<{ name: string; address: PublicKey }> = [];
-
-    // Determine compressible names by tags
-    const tags = scanCompressibleNames(this._idl);
-
-    // Separate CPDA and ctoken accounts for proper ordering
-    const cpdaAccounts: Array<{ name: string; address: PublicKey }> = [];
-    const ctokenAccounts: Array<{ name: string; address: PublicKey }> = [];
 
     for (const [name, addr] of Object.entries(this._decompressAccounts)) {
       if (SKIP_ACCOUNTS.has(name)) continue;
@@ -832,12 +862,16 @@ export class MethodsBuilder<
       try {
         const pubkey = translateAddress(addr as Address);
 
-        // Sort by type: CPDAs first, then ctokens
-        if (tags.cpda.has(name)) {
-          cpdaAccounts.push({ name, address: pubkey });
-        } else if (tags.cctoken.has(name)) {
-          ctokenAccounts.push({ name, address: pubkey });
+        // Skip accounts set to programId - these are explicitly marked as "None/not needed"
+        if (pubkey.equals(this._programId)) {
+          console.log(
+            `[decompressIfNeeded] Skipping account '${name}' (set to programId = None)`
+          );
+          continue;
         }
+
+        // All provided non-system, non-placeholder accounts should be checked
+        accountsToCheck.push({ name, address: pubkey });
       } catch {
         console.warn(
           `[decompressIfNeeded] Invalid address for ${name}, skipping`
@@ -845,8 +879,30 @@ export class MethodsBuilder<
       }
     }
 
-    // Concatenate: CPDAs first, then ctokens (matches SDK/reference ordering)
-    accountsToCheck.push(...cpdaAccounts, ...ctokenAccounts);
+    // Validate: All compressible accounts used by main instruction must be provided
+    const mainIxCompressible = this._getMainInstructionCompressibleAccounts();
+    const providedCompressible = new Set(accountsToCheck.map((a) => a.name));
+    const missing: string[] = [];
+
+    for (const accountName of Array.from(mainIxCompressible)) {
+      const inMain = this._getFromMainInstruction(accountName);
+      if (inMain && !providedCompressible.has(accountName)) {
+        // Main instruction uses this compressible account, but not checked for decompression
+        missing.push(accountName);
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new Error(
+        `[decompressIfNeeded] Missing compressible accounts used by main instruction: ${missing.join(
+          ", "
+        )}.\n` +
+          `These accounts are marked as compressible in the IDL and must be provided to decompressIfNeeded().\n` +
+          `Add them: .decompressIfNeeded({ ..., ${missing
+            .map((n) => `${n}: <address>`)
+            .join(", ")} })`
+      );
+    }
 
     // Fetch compression state for all accounts
     const accountInputs = await this._fetchCompressibleAccounts(
@@ -913,98 +969,21 @@ export class MethodsBuilder<
     // Auto-resolve constant and default accounts before validation
     this._autoResolveDecompressAccounts();
 
-    // Determine which seed accounts are required by the compressible accounts being decompressed
-    // Extract seed dependencies from IDL's pda.seeds field
-    const requiredSeeds = new Set<string>();
+    // Determine which seed accounts are required based on what's being decompressed
+    const requiredSeeds = this._extractRequiredSeeds(accountInputs);
+    console.log(
+      `[decompressIfNeeded] Required seeds for decompression:`,
+      Array.from(requiredSeeds)
+    );
 
-    // Helper to extract seed account names from IDL account definition
-    // Searches all instructions to find where the account is defined as a PDA
-    const extractSeedAccountsFromIdl = (accountName: string): string[] => {
-      if (!this._idl) return [];
-
-      // Helper to find account in nested structure
-      const findAccount = (accounts: readonly any[], name: string): any => {
-        for (const acc of accounts) {
-          if ("accounts" in acc) {
-            const found = findAccount(acc.accounts, name);
-            if (found) return found;
-          } else if (acc.name === name) {
-            return acc;
-          }
-        }
-        return null;
-      };
-
-      // Search all instructions for this account's PDA definition
-      // TypeScript IDL is already in camelCase, use account names as-is
-      for (const ix of this._idl.instructions) {
-        const accountDef = findAccount(ix.accounts, accountName);
-        if (accountDef && accountDef.pda && accountDef.pda.seeds) {
-          // Found PDA definition - extract seed account names
-          const seedAccounts: string[] = [];
-          for (const seed of accountDef.pda.seeds) {
-            if (seed.kind === "account" && seed.path) {
-              // Path is already in camelCase in TS IDL (e.g., "ammConfig", "token0Mint")
-              // Just extract the base account name before any dots or parens
-              const baseName = seed.path.split(".")[0].split("(")[0];
-              seedAccounts.push(baseName);
-            }
-          }
-          return seedAccounts;
-        }
-      }
-
-      return [];
-    };
-
-    for (const input of accountInputs) {
-      if (input.tokenVariant) {
-        // For CToken accounts, determine the required mint seed
-        // token0Vault → token0Mint, token1Vault → token1Mint, lpVault → lpMint
-        const variant = input.tokenVariant as string;
-        const mintSeed = variant.replace("Vault", "Mint");
-        requiredSeeds.add(mintSeed);
-        console.log(
-          `[decompressIfNeeded] Account '${variant}' is being decompressed, requires seed: '${mintSeed}'`
-        );
-      } else {
-        // For CPDA accounts, extract seed dependencies from IDL
-        const accountType = input.accountType as string;
-        const seedAccounts = extractSeedAccountsFromIdl(accountType);
-
-        for (const seed of seedAccounts) {
-          requiredSeeds.add(seed);
-          console.log(
-            `[decompressIfNeeded] Account '${accountType}' is being decompressed, requires seed: '${seed}' (from IDL)`
-          );
-        }
-      }
-    }
-
-    // Auto-pull required seeds from main instruction if not explicitly provided
-    const missingRequiredSeeds: string[] = [];
-    for (const seedName of requiredSeeds) {
-      let isMissing = false;
-
-      // Check if seed is in decompressAccounts
-      if (!(seedName in this._decompressAccounts)) {
-        isMissing = true;
-      } else {
-        try {
-          const seedPubkey = translateAddress(
-            this._decompressAccounts[seedName] as Address
-          );
-          if (seedPubkey.equals(programId)) {
-            // Seed is set to program ID (placeholder, not provided)
-            isMissing = true;
-          }
-        } catch {
-          isMissing = true;
-        }
-      }
-
-      // If missing, try to get from main instruction
-      if (isMissing) {
+    // Auto-pull required seeds from main instruction
+    for (const seedName of Array.from(requiredSeeds)) {
+      if (
+        !(seedName in this._decompressAccounts) ||
+        translateAddress(this._decompressAccounts[seedName] as Address).equals(
+          programId
+        )
+      ) {
         const fromMain = this._getFromMainInstruction(seedName);
         if (fromMain) {
           console.log(
@@ -1013,30 +992,17 @@ export class MethodsBuilder<
           );
           this._decompressAccounts[seedName] = fromMain;
         } else {
-          missingRequiredSeeds.push(seedName);
+          throw new Error(
+            `[decompressIfNeeded] Required seed account '${seedName}' is missing. ` +
+              `It's needed for decompressing but not found in main instruction. ` +
+              `Please provide it explicitly in decompressIfNeeded() call.`
+          );
         }
       }
     }
 
-    if (missingRequiredSeeds.length > 0) {
-      const compressibleNames = accountInputs
-        .map((ai) => ai.tokenVariant || ai.accountType)
-        .join(", ");
-      throw new Error(
-        `[decompressIfNeeded] Cannot decompress accounts [${compressibleNames}] because required seed accounts are missing: ${missingRequiredSeeds.join(
-          ", "
-        )}.\n\n` +
-          `These seed accounts must be provided when decompressing their associated compressible accounts. ` +
-          `Please include them in either:\n` +
-          `  1. The main instruction's .accounts() or .accountsStrict() call, OR\n` +
-          `  2. The .decompressIfNeeded() call\n\n` +
-          `The framework will automatically pull seeds from the main instruction if available.`
-      );
-    }
-
     // Fill in any missing accounts with program ID (represents "None" for optional accounts)
-    // This ensures all accounts from the IDL are present, even if not used
-    // BUT we only auto-fill accounts that are NOT required by compressible accounts being decompressed
+    // Only fill accounts that are NOT required seeds
     const completeAccounts = { ...this._decompressAccounts };
     const decompressIxAccounts = decompressInstruction.accounts || [];
 
@@ -1044,9 +1010,8 @@ export class MethodsBuilder<
       const accountName = typeof acc === "string" ? acc : acc.name;
       if (!(accountName in completeAccounts)) {
         if (requiredSeeds.has(accountName)) {
-          // This should have been caught above, but double-check
           throw new Error(
-            `[decompressIfNeeded] Required seed account '${accountName}' is missing but needed for decompression.`
+            `[decompressIfNeeded] Required seed account '${accountName}' is missing.`
           );
         }
         console.log(
@@ -1096,12 +1061,16 @@ export class MethodsBuilder<
    * @returns the transaction instruction
    */
   public async instruction(): Promise<TransactionInstruction> {
+    if (this._enableAutoDecompress) {
+      throw new Error(
+        "decompressIfNeeded() cannot be used with .instruction(). " +
+          "Use .transaction() or .rpc() instead, which handle multiple instructions."
+      );
+    }
+
     if (this._resolveAccounts) {
       await this._accountsResolver.resolve();
     }
-
-    // Inject decompress if configured
-    await this._injectDecompressIfNeeded();
 
     // @ts-ignore
     return this._ixFn(...this._args, {

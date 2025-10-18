@@ -86,6 +86,8 @@ pub struct IdlInstructionAccount {
     pub signer: bool,
     #[serde(default, skip_serializing_if = "is_default")]
     pub optional: bool,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub compressible: bool,
     #[serde(skip_serializing_if = "is_default")]
     pub address: Option<String>,
     #[serde(skip_serializing_if = "is_default")]

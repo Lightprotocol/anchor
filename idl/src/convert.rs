@@ -510,6 +510,7 @@ mod legacy {
                     writable: acc.is_mut,
                     signer: acc.is_signer,
                     optional: acc.is_optional.unwrap_or_default(),
+                    compressible: false,
                     address: Default::default(),
                     pda: acc
                         .pda
