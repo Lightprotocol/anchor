@@ -637,6 +637,145 @@ export class MethodsBuilder<
   }
 
   /**
+   * Helper to get account from main instruction if it exists with the same name
+   */
+  private _getFromMainInstruction(accountName: string): PublicKey | null {
+    const programId = this._programId;
+    if (this._accounts && accountName in this._accounts) {
+      try {
+        const pubkey = translateAddress(this._accounts[accountName] as Address);
+        if (!pubkey.equals(programId)) {
+          console.log(
+            `[decompressIfNeeded] Using '${accountName}' from main instruction:`,
+            pubkey.toBase58()
+          );
+          return pubkey;
+        }
+      } catch {
+        // Invalid address, ignore
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Auto-resolve constant and default accounts for decompressAccountsIdempotent.
+   * Priority: 1) User explicit values in decompressIfNeeded, 2) Main instruction accounts, 3) Auto-resolved defaults
+   */
+  private _autoResolveDecompressAccounts(): void {
+    if (!this._decompressAccounts) return;
+
+    const programId = this._programId;
+
+    // Helper to check if an account is missing or set to program ID (placeholder)
+    const isAccountMissing = (name: string): boolean => {
+      if (!this._decompressAccounts || !(name in this._decompressAccounts))
+        return true;
+      try {
+        const pubkey = translateAddress(
+          this._decompressAccounts![name] as Address
+        );
+        return pubkey.equals(programId);
+      } catch {
+        return true;
+      }
+    };
+
+    // Constants (ALWAYS these values - enforced by Rust constraints)
+    const CTOKEN_PROGRAM_ID = new PublicKey(
+      "cTokenmWW8bLPjZEBAUgYy3zKxQZW6VKi7bqNFEVv3m"
+    );
+    const CTOKEN_CPI_AUTHORITY_PDA = new PublicKey(
+      "GXtd2izAiMJPwMEjfgTRH3d7k9mjn4Jq3JrWFv9gySYy"
+    );
+
+    // Auto-resolve ctokenProgram (check main instruction first)
+    if (isAccountMissing("ctokenProgram")) {
+      const fromMain = this._getFromMainInstruction("ctokenProgram");
+      if (fromMain && fromMain.equals(CTOKEN_PROGRAM_ID)) {
+        this._decompressAccounts.ctokenProgram = fromMain;
+      } else {
+        console.log(
+          "[decompressIfNeeded] Auto-resolving ctokenProgram to constant:",
+          CTOKEN_PROGRAM_ID.toBase58()
+        );
+        this._decompressAccounts.ctokenProgram = CTOKEN_PROGRAM_ID;
+      }
+    }
+
+    // Auto-resolve ctokenCpiAuthority (check main instruction first)
+    if (isAccountMissing("ctokenCpiAuthority")) {
+      const fromMain = this._getFromMainInstruction("ctokenCpiAuthority");
+      if (fromMain && fromMain.equals(CTOKEN_CPI_AUTHORITY_PDA)) {
+        this._decompressAccounts.ctokenCpiAuthority = fromMain;
+      } else {
+        console.log(
+          "[decompressIfNeeded] Auto-resolving ctokenCpiAuthority to constant:",
+          CTOKEN_CPI_AUTHORITY_PDA.toBase58()
+        );
+        this._decompressAccounts.ctokenCpiAuthority = CTOKEN_CPI_AUTHORITY_PDA;
+      }
+    }
+
+    // Auto-resolve config (check main instruction first, then derive)
+    console.log("CHECKING if CONFIG IS MISSING");
+    if (isAccountMissing("config")) {
+      console.log("CONFIG IS MISSING");
+      const fromMain = this._getFromMainInstruction("config");
+      if (fromMain) {
+        console.log("CONFIG IS in MAIN");
+        console.log("FROM MAIN:", fromMain.toString());
+        this._decompressAccounts.config = fromMain;
+      } else {
+        // Derive compression config PDA owned by the user's program.
+        // defaults to index 0
+        const [configPda] = deriveCompressionConfigAddress(programId);
+        console.log("programId:", programId.toString());
+        console.log(
+          "SHOULD BE THE SAME:",
+          deriveCompressionConfigAddress(programId)[0].toString()
+        );
+        console.log(
+          "[decompressIfNeeded] Auto-resolving config to program's config PDA:",
+          configPda.toBase58(),
+          "(Note: must be initialized first via initialize_compression_config)"
+        );
+        this._decompressAccounts.config = configPda;
+      }
+    }
+
+    // Auto-resolve ctokenRentSponsor (check main instruction first, then fallback to feePayer)
+    if (isAccountMissing("ctokenRentSponsor")) {
+      const fromMain = this._getFromMainInstruction("ctokenRentSponsor");
+      if (fromMain) {
+        this._decompressAccounts.ctokenRentSponsor = fromMain;
+      } else {
+        console.log(
+          "[decompressIfNeeded] Auto-resolving ctokenRentSponsor to cosntant CTOKEN_RENT_SPONSOR:",
+          CTOKEN_RENT_SPONSOR.toBase58()
+        );
+        this._decompressAccounts.ctokenRentSponsor = CTOKEN_RENT_SPONSOR;
+      }
+    }
+
+    // Auto-resolve ctokenConfig (check main instruction first, then derive)
+    if (isAccountMissing("ctokenConfig")) {
+      const fromMain = this._getFromMainInstruction("ctokenConfig");
+      if (fromMain) {
+        this._decompressAccounts.ctokenConfig = fromMain;
+      } else {
+        // Derive ctoken config PDA using the correct SDK function
+        const [ctokenConfigPda] = deriveTokenProgramConfig();
+        console.log(
+          "[decompressIfNeeded] Auto-resolving ctokenConfig to default PDA:",
+          ctokenConfigPda.toBase58()
+        );
+        this._decompressAccounts.ctokenConfig = ctokenConfigPda;
+      }
+    }
+  }
+
+  /**
    * Internal method to inject decompress instruction if needed.
    */
   private async _injectDecompressIfNeeded(): Promise<void> {
@@ -771,8 +910,53 @@ export class MethodsBuilder<
       return;
     }
 
+    // Auto-resolve constant and default accounts before validation
+    this._autoResolveDecompressAccounts();
+
     // Determine which seed accounts are required by the compressible accounts being decompressed
+    // Extract seed dependencies from IDL's pda.seeds field
     const requiredSeeds = new Set<string>();
+
+    // Helper to extract seed account names from IDL account definition
+    // Searches all instructions to find where the account is defined as a PDA
+    const extractSeedAccountsFromIdl = (accountName: string): string[] => {
+      if (!this._idl) return [];
+
+      // Helper to find account in nested structure
+      const findAccount = (accounts: readonly any[], name: string): any => {
+        for (const acc of accounts) {
+          if ("accounts" in acc) {
+            const found = findAccount(acc.accounts, name);
+            if (found) return found;
+          } else if (acc.name === name) {
+            return acc;
+          }
+        }
+        return null;
+      };
+
+      // Search all instructions for this account's PDA definition
+      // TypeScript IDL is already in camelCase, use account names as-is
+      for (const ix of this._idl.instructions) {
+        const accountDef = findAccount(ix.accounts, accountName);
+        if (accountDef && accountDef.pda && accountDef.pda.seeds) {
+          // Found PDA definition - extract seed account names
+          const seedAccounts: string[] = [];
+          for (const seed of accountDef.pda.seeds) {
+            if (seed.kind === "account" && seed.path) {
+              // Path is already in camelCase in TS IDL (e.g., "ammConfig", "token0Mint")
+              // Just extract the base account name before any dots or parens
+              const baseName = seed.path.split(".")[0].split("(")[0];
+              seedAccounts.push(baseName);
+            }
+          }
+          return seedAccounts;
+        }
+      }
+
+      return [];
+    };
+
     for (const input of accountInputs) {
       if (input.tokenVariant) {
         // For CToken accounts, determine the required mint seed
@@ -783,27 +967,52 @@ export class MethodsBuilder<
         console.log(
           `[decompressIfNeeded] Account '${variant}' is being decompressed, requires seed: '${mintSeed}'`
         );
+      } else {
+        // For CPDA accounts, extract seed dependencies from IDL
+        const accountType = input.accountType as string;
+        const seedAccounts = extractSeedAccountsFromIdl(accountType);
+
+        for (const seed of seedAccounts) {
+          requiredSeeds.add(seed);
+          console.log(
+            `[decompressIfNeeded] Account '${accountType}' is being decompressed, requires seed: '${seed}' (from IDL)`
+          );
+        }
       }
-      // For CPDA accounts, we could add more sophisticated logic here if needed
-      // For now, CPDA accounts like poolState, observationState typically don't have seed dependencies
-      // or their seeds are derived from other accounts already in the structure
     }
 
-    // Validate that all required seeds are provided
+    // Auto-pull required seeds from main instruction if not explicitly provided
     const missingRequiredSeeds: string[] = [];
     for (const seedName of requiredSeeds) {
+      let isMissing = false;
+
+      // Check if seed is in decompressAccounts
       if (!(seedName in this._decompressAccounts)) {
-        missingRequiredSeeds.push(seedName);
+        isMissing = true;
       } else {
         try {
           const seedPubkey = translateAddress(
             this._decompressAccounts[seedName] as Address
           );
           if (seedPubkey.equals(programId)) {
-            // Seed is set to program ID (not provided)
-            missingRequiredSeeds.push(seedName);
+            // Seed is set to program ID (placeholder, not provided)
+            isMissing = true;
           }
         } catch {
+          isMissing = true;
+        }
+      }
+
+      // If missing, try to get from main instruction
+      if (isMissing) {
+        const fromMain = this._getFromMainInstruction(seedName);
+        if (fromMain) {
+          console.log(
+            `[decompressIfNeeded] Auto-pulling required seed '${seedName}' from main instruction:`,
+            fromMain.toBase58()
+          );
+          this._decompressAccounts[seedName] = fromMain;
+        } else {
           missingRequiredSeeds.push(seedName);
         }
       }
@@ -811,15 +1020,17 @@ export class MethodsBuilder<
 
     if (missingRequiredSeeds.length > 0) {
       const compressibleNames = accountInputs
-        .filter((ai) => ai.tokenVariant)
-        .map((ai) => ai.tokenVariant)
+        .map((ai) => ai.tokenVariant || ai.accountType)
         .join(", ");
       throw new Error(
         `[decompressIfNeeded] Cannot decompress accounts [${compressibleNames}] because required seed accounts are missing: ${missingRequiredSeeds.join(
           ", "
         )}.\n\n` +
           `These seed accounts must be provided when decompressing their associated compressible accounts. ` +
-          `Please include them in the decompressIfNeeded() call.`
+          `Please include them in either:\n` +
+          `  1. The main instruction's .accounts() or .accountsStrict() call, OR\n` +
+          `  2. The .decompressIfNeeded() call\n\n` +
+          `The framework will automatically pull seeds from the main instruction if available.`
       );
     }
 
