@@ -1474,15 +1474,10 @@ export class MethodsBuilder<
             }
           }
         } else {
-          // No seeds defined - try generic name-based fuzzy matching
+          // No seeds defined - try exact name matching only (no fuzzy matching to avoid false positives)
           console.log(
-            `[decompressIfNeeded]   ├─ No seeds - trying fuzzy name matching...`
+            `[decompressIfNeeded]   ├─ No seeds - trying exact name matching only...`
           );
-
-          // Extract the core name parts for matching (e.g., "pool" from "pool_state", "observation" from "observation_state")
-          const accountNameParts = accountName
-            .split("_")
-            .filter((p) => p.length > 2);
 
           for (const [mainAccName, mainAccValue] of mainAccountEntries) {
             try {
@@ -1494,7 +1489,7 @@ export class MethodsBuilder<
                 .toLowerCase()
                 .replace(/^_/, "");
 
-              // Check exact match
+              // Check exact match only (no fuzzy matching to prevent false positives)
               if (mainSnakeName === accountName) {
                 resolved = mainPubkey;
                 console.log(
@@ -1502,26 +1497,28 @@ export class MethodsBuilder<
                 );
                 break;
               }
-
-              // Check if main account name contains core parts of the compressible account name
-              const matchScore = accountNameParts.filter((part) =>
-                mainSnakeName.includes(part)
-              ).length;
-
-              if (
-                matchScore > 0 &&
-                matchScore / accountNameParts.length >= 0.5
-              ) {
-                resolved = mainPubkey;
-                console.log(
-                  `[decompressIfNeeded]   └─ ✓ P4 Fuzzy name match: '${accountName}' → '${mainAccName}' (${matchScore}/${
-                    accountNameParts.length
-                  } parts) → ${mainPubkey.toBase58()}`
-                );
-                break;
-              }
             } catch {}
           }
+
+          // // If still not resolved after exact match, throw error
+          // if (!resolved) {
+          //   console.log(
+          //     `[decompressIfNeeded]   ✗ Account '${accountName}' has no seeds and no exact name match found`
+          //   );
+          //   throw new Error(
+          //     `[decompressIfNeeded] Account '${accountName}' is marked as compressible but has no seeds defined in the IDL.\n\n` +
+          //       `All compressible accounts must have PDA seed definitions (enforced by the Light Protocol macro).\n\n` +
+          //       `This error indicates:\n` +
+          //       `  - The IDL may be malformed or corrupted\n` +
+          //       `  - The program was not properly compiled with the Light Protocol macros\n` +
+          //       `  - The IDL was manually edited incorrectly\n\n` +
+          //       `Solutions:\n` +
+          //       `  1. Rebuild the program and regenerate the IDL\n` +
+          //       `  2. Provide the account explicitly: .decompressIfNeeded({ ${accountName}: <address>, ... })\n` +
+          //       `  3. If this account isn't needed for this instruction, don't provide it explicitly\n\n` +
+          //       `For support, visit: https://docs.lightprotocol.com`
+          //   );
+          // }
         }
 
         if (!resolved) {
