@@ -66,6 +66,190 @@ export type MethodsNamespace<
   I extends AllInstructions<IDL> = AllInstructions<IDL>
 > = MakeMethodsNamespace<IDL, I>;
 
+/**
+ * Light Protocol compression metadata extracted from IDL
+ */
+interface LightCompressibleMetadata {
+  compressibleAccounts: Map<
+    string,
+    {
+      accountType: "pda" | "token";
+      seeds: Array<{ type: "const" | "account"; value: string }>;
+    }
+  >;
+}
+
+/**
+ * Extract Light Protocol compression metadata from IDL enums.
+ *
+ * Parses CTokenAccountVariant and CompressedAccountVariant enums to determine:
+ * - Which accounts are compressible
+ * - Whether they're PDAs or tokens
+ * - What their seed dependencies are
+ */
+function extractLightMetadata(idl: Idl): LightCompressibleMetadata | null {
+  const compressibleAccounts = new Map<
+    string,
+    {
+      accountType: "pda" | "token";
+      seeds: Array<{ type: "const" | "account"; value: string }>;
+    }
+  >();
+
+  if (!idl.types) return null;
+
+  const findAccountDef = (accounts: readonly any[], name: string): any => {
+    for (const acc of accounts) {
+      if ("accounts" in acc) {
+        const found = findAccountDef(acc.accounts, name);
+        if (found) return found;
+      } else if (acc.name === name) {
+        return acc;
+      }
+    }
+    return null;
+  };
+
+  const extractPdaSeeds = (
+    accountName: string
+  ): Array<{ type: "const" | "account"; value: string }> => {
+    for (const ix of idl.instructions) {
+      const accountDef = findAccountDef(ix.accounts, accountName);
+      if (accountDef && accountDef.pda && accountDef.pda.seeds) {
+        const seeds: Array<{ type: "const" | "account"; value: string }> = [];
+
+        // Check for cross-program PDA (unsupported)
+        if (accountDef.pda.program) {
+          throw new Error(
+            `[decompressIfNeeded] Account '${accountName}' uses cross-program PDA derivation (seeds::program), which is not supported for auto-resolution.\n\n` +
+              `Solution: Provide all accounts explicitly: .decompressIfNeeded({ ${accountName}: <address>, ... })`
+          );
+        }
+
+        for (const seed of accountDef.pda.seeds) {
+          if (seed.kind === "const" && seed.value) {
+            // Convert byte array to UTF-8 string
+            const constValue = Buffer.from(seed.value).toString("utf8");
+            seeds.push({ type: "const", value: constValue });
+          } else if (seed.kind === "arg") {
+            // Instruction arguments are runtime values, not resolvable accounts
+            throw new Error(
+              `[decompressIfNeeded] Account '${accountName}' depends on instruction argument '${seed.path}', which cannot be auto-resolved.\n\n` +
+                `Instruction arguments are runtime values you must provide.\n\n` +
+                `Solutions:\n` +
+                `  1. Provide the resolved account explicitly: .decompressIfNeeded({ ${accountName}: <derived_address>, ... })\n` +
+                `  2. If auto-decompression isn't needed for this instruction, remove '${accountName}' from decompressIfNeeded()\n` +
+                `  3. Build the transaction manually without decompressIfNeeded()`
+            );
+          } else if (seed.kind === "account") {
+            // For account seeds, check if it's a field reference (path contains ".")
+            // e.g., "pool_state.lp_mint" means: read lpMint field from poolState account
+            if (seed.path && seed.path.includes(".")) {
+              // Field reference: "account.field"
+              // The field name (after the dot) is what we need as the seed account
+              const parts = seed.path.split(".");
+              if (parts.length >= 2) {
+                // Convert to camelCase: "lp_mint" -> "lpMint"
+                const fieldName = parts[parts.length - 1].replace(
+                  /_([a-z0-9])/g,
+                  (_, letter) => letter.toUpperCase()
+                );
+                seeds.push({ type: "account", value: fieldName });
+              }
+            } else {
+              // Direct account reference (no field)
+              const accountRef = seed.account || seed.path;
+              if (accountRef) {
+                const baseName = accountRef.split(".")[0].split("(")[0];
+                seeds.push({ type: "account", value: baseName });
+              }
+            }
+          }
+        }
+        return seeds;
+      }
+    }
+    return [];
+  };
+
+  // c-token accounts
+  const ctokenVariant = idl.types.find(
+    (t) => t.name === "cTokenAccountVariant"
+  );
+  if (ctokenVariant && "variants" in ctokenVariant.type) {
+    for (const variant of ctokenVariant.type.variants) {
+      const variantName = variant.name; // Keep camelCase from IDL
+
+      const seeds = extractPdaSeeds(variantName);
+
+      compressibleAccounts.set(variantName, {
+        accountType: "token",
+        seeds,
+      });
+    }
+  }
+
+  // compressed PDA accounts
+  // Dedupe "packed*" variants (e.g., packedPoolState is same as poolState)
+  const compressedVariant = idl.types.find(
+    (t) => t.name === "compressedAccountVariant"
+  );
+  if (compressedVariant && "variants" in compressedVariant.type) {
+    const seenBaseNames = new Set<string>();
+
+    for (const variant of compressedVariant.type.variants) {
+      const variantName = variant.name; // Keep camelCase from IDL
+
+      // Skip wrapper types that contain token variants
+      if (
+        variantName.toLowerCase().includes("ctokendata") ||
+        variantName.toLowerCase().includes("tokendata")
+      ) {
+        continue;
+      }
+
+      // Dedupe packed variants (e.g., packedPoolState -> poolState)
+      let baseName = variantName;
+      const isPacked = variantName.startsWith("packed");
+      if (isPacked) {
+        // Remove 'packed' prefix and lowercase first letter: packedPoolState -> poolState
+        baseName = variantName.replace(/^packed/, "");
+        baseName = baseName.charAt(0).toLowerCase() + baseName.slice(1);
+        if (seenBaseNames.has(baseName)) {
+          continue;
+        }
+      }
+
+      let seeds = extractPdaSeeds(variantName);
+      if (seeds.length === 0 && isPacked) {
+        // Try unpacked version for seeds
+        const unpackedVariantName = variantName.replace(/^packed/, "");
+        seeds = extractPdaSeeds(unpackedVariantName);
+      }
+
+      seenBaseNames.add(baseName);
+      compressibleAccounts.set(baseName, {
+        accountType: "pda",
+        seeds,
+      });
+    }
+  }
+
+  if (compressibleAccounts.size === 0) return null;
+
+  console.log(
+    `[Light] Extracted metadata for ${compressibleAccounts.size} compressible account(s):`
+  );
+  compressibleAccounts.forEach((meta, name) => {
+    const seedsStr = meta.seeds
+      .map((s) => (s.type === "const" ? `"${s.value}"` : s.value))
+      .join(", ");
+    console.log(`  - ${name}: type=${meta.accountType}, seeds=[${seedsStr}]`);
+  });
+
+  return { compressibleAccounts };
+}
+
 export class MethodsBuilderFactory {
   public static build<IDL extends Idl, I extends AllInstructions<IDL>>(
     provider: Provider,
@@ -220,6 +404,7 @@ export class MethodsBuilder<
   private _allInstructionFns?: Record<string, InstructionFn<IDL>>;
   private _programId: PublicKey;
   private _accountNamespace: AccountNamespace<IDL>;
+  private _lightMetadata?: LightCompressibleMetadata | null;
 
   constructor(
     private _args: Array<any>,
@@ -253,6 +438,16 @@ export class MethodsBuilder<
       idlTypes,
       customResolver
     );
+
+    // Extract Light Protocol compression metadata from IDL if available
+    if (idl) {
+      console.log("Extracting Light Protocol compression metadata from IDL");
+      this._lightMetadata = extractLightMetadata(idl);
+      console.log(
+        "Light Protocol compression metadata extracted..",
+        this._lightMetadata
+      );
+    }
   }
 
   public args(args: Array<any>): void {
@@ -359,48 +554,53 @@ export class MethodsBuilder<
   }
 
   /**
-   * Enable automatic decompression for compressible accounts.
+   * Enable automatic decompression for compressible accounts via IDL.
    *
-   * System accounts (feePayer, config, etc.) are REQUIRED.
-   * Seed accounts (lpMint, ammConfig, etc.) are OPTIONAL - only provide them
-   * if their dependent compressible accounts are being decompressed.
+   * Resolution priority for each account:
+   * 1. Explicitly provided in decompressIfNeeded() call
+   * 2. Auto-pulled from main instruction (same name)
+   * 3. Auto-resolved constants (ctokenProgram, ctokenCpiAuthority, config,
+   *    etc.)
+   * 4. Error if required but not found
    *
-   * Automatically infers account types and variants from IDL, fetches compression state,
-   * and injects decompress instruction if needed.
-   *
-   * @param accounts - Accounts for decompressAccountsIdempotent instruction.
-   *                   System accounts required, seed accounts optional.
-   * @returns this builder for chaining
+   * @param accounts Partial accounts for decompressAccountsIdempotent
+   * @returns MethodsBuilder<IDL, I, A, D> for chaining
    *
    * @example
    * ```ts
+   * // Auto-resolve everything (feePayer from provider.wallet)
+   * await program.methods
+   *   .swap(amount)
+   *   .decompressIfNeeded()
+   *   .accounts({ ... })
+   *   .rpc();
+   *
+   * // Minimal - provide only what can't be auto-resolved
    * await program.methods
    *   .swap(amount)
    *   .decompressIfNeeded({
-   *     // System accounts (required)
    *     feePayer: owner.publicKey,
-   *     config: compressionConfig,
    *     rentPayer: owner.publicKey,
-   *     ctokenRentSponsor: CTOKEN_RENT_SPONSOR,
-   *     ctokenProgram: CompressedTokenProgram.programId,
-   *     ctokenCpiAuthority: CompressedTokenProgram.deriveCpiAuthorityPda,
-   *     ctokenConfig,
-   *     // Seed accounts (optional - only provide what's needed)
-   *     ammConfig,      // Only if poolState is compressed
-   *     token0Mint,     // Only if token0Vault is compressed
-   *     token1Mint,     // Only if token1Vault is compressed
-   *     // lpMint: omitted because lpVault not being decompressed
-   *     // Compressible accounts
-   *     poolState,
-   *     token0Vault,
-   *     token1Vault,
+   *   })
+   *   .accounts({ ... })
+   *   .rpc();
+   *
+   * // Explicit - override specific accounts
+   * await program.methods
+   *   .swap(amount)
+   *   .decompressIfNeeded({
+   *     feePayer: owner.publicKey,
+   *     rentPayer: owner.publicKey,
+   *     ammConfig: configAddress,
+   *     token0Mint: inputToken,
+   *     token1Mint: outputToken,
    *   })
    *   .accounts({ ... })
    *   .rpc();
    * ```
    */
   public decompressIfNeeded(
-    accounts: Partial<Accounts<D>> & { [name: string]: Address }
+    accounts: Partial<Accounts<D>> & { [name: string]: Address } = {}
   ) {
     this._enableAutoDecompress = true;
     this._decompressAccounts = flattenPartialAccounts(accounts as any, false);
@@ -440,10 +640,18 @@ export class MethodsBuilder<
 
     const defaultAddressTreeInfo = getDefaultAddressTreeInfo();
 
-    const accountInputs: AccountInput[] = [];
+    console.log(
+      `[decompressIfNeeded] Fetching compression state for ${accountsToCheck.length} account(s)...`
+    );
 
-    // Check each provided account to see if it's actually compressed
-    for (const { name, address } of accountsToCheck) {
+    // Prepare an array of concurrent fetch promises
+    const fetchPromises = accountsToCheck.map(async ({ name, address }) => {
+      console.log(
+        `[decompressIfNeeded]   → Checking '${name}' (${address.toBase58()})...`
+      );
+
+      // name is already camelCase from IDL metadata
+
       try {
         // Try fetching as CPDA first
         // @ts-ignore
@@ -455,6 +663,9 @@ export class MethodsBuilder<
         );
 
         if (cpdaResult && cpdaResult.merkleContext && cpdaResult.isCompressed) {
+          console.log(
+            `[decompressIfNeeded]     ✓ Account '${name}' is COMPRESSED`
+          );
           // It's a compressed account
           if (
             cpdaResult.accountInfo.owner.equals(
@@ -465,7 +676,7 @@ export class MethodsBuilder<
             try {
               const parsed = parseTokenData(cpdaResult.accountInfo.data);
               if (parsed) {
-                accountInputs.push({
+                return {
                   address,
                   info: {
                     accountInfo: cpdaResult.accountInfo,
@@ -474,7 +685,7 @@ export class MethodsBuilder<
                   },
                   accountType: "cTokenData",
                   tokenVariant: name,
-                });
+                } as AccountInput;
               }
             } catch {
               // Not a token account, ignore
@@ -482,35 +693,59 @@ export class MethodsBuilder<
           } else {
             // It's a compressed program account
             let parsed = null;
+
+            // Use camelCase name for account client lookup
             const accountClient = (this._accountNamespace as any)[name];
+
+            console.log(
+              `[decompressIfNeeded]     → Trying to parse '${name}' using account client '${name}'`
+            );
+
             if (accountClient?.coder) {
               try {
                 parsed = accountClient.coder.accounts.decode(
                   name,
                   cpdaResult.accountInfo.data
                 );
+                console.log(
+                  `[decompressIfNeeded]     ✓ Parsed successfully using decode()`
+                );
               } catch {
                 try {
                   parsed = accountClient.coder.accounts.decodeAny(
                     cpdaResult.accountInfo.data
                   );
-                } catch {
-                  // Parsing failed, use null
+                  console.log(
+                    `[decompressIfNeeded]     ✓ Parsed successfully using decodeAny()`
+                  );
+                } catch (e) {
+                  console.log(
+                    `[decompressIfNeeded]     ✗ Parsing failed: ${
+                      (e as Error).message
+                    }`
+                  );
                 }
               }
+            } else {
+              console.log(
+                `[decompressIfNeeded]     ✗ No account client found for '${name}'`
+              );
             }
 
-            accountInputs.push({
+            return {
               address,
               info: {
                 accountInfo: cpdaResult.accountInfo,
                 parsed,
                 merkleContext: cpdaResult.merkleContext,
               },
-              accountType: name, // cpda accountType equals the IDL account name
-            });
+              accountType: name,
+            } as AccountInput;
           }
         } else {
+          console.log(
+            `[decompressIfNeeded]     ✗ Not compressed via getAccountInfoInterface, trying token fallback...`
+          );
           // Try as compressed token via getAccountInterface as fallback
           try {
             const tokenRes = await getAccountInterface(
@@ -520,21 +755,50 @@ export class MethodsBuilder<
               CompressedTokenProgram.programId
             );
             if (tokenRes && (tokenRes as any).merkleContext) {
-              accountInputs.push({
+              console.log(
+                `[decompressIfNeeded]     ✓ Found via token fallback - COMPRESSED token`
+              );
+              return {
                 address,
                 info: tokenRes as any,
                 accountType: "cTokenData",
                 tokenVariant: name,
-              });
+              } as AccountInput;
+            } else {
+              console.log(
+                `[decompressIfNeeded]     ✗ Account '${name}' is NOT compressed (no merkleContext)`
+              );
             }
-          } catch {
-            // Not a compressed account
+          } catch (err) {
+            console.log(
+              `[decompressIfNeeded]     ✗ Token fallback failed: ${
+                (err as Error).message
+              }`
+            );
           }
         }
-      } catch {
-        // Account doesn't exist or can't be fetched, skip
+      } catch (err) {
+        console.log(
+          `[decompressIfNeeded]     ✗ Error fetching '${name}': ${
+            (err as Error).message
+          }`
+        );
       }
-    }
+      // Return undefined if no compressed account found
+      return undefined;
+    });
+
+    // Run all fetchers concurrently
+    const results = await Promise.allSettled(fetchPromises);
+
+    // Collect all successful AccountInput results (move .value up to array)
+    const accountInputs: AccountInput[] = [];
+    results.forEach((result, idx) => {
+      if (result.status === "fulfilled" && result.value) {
+        accountInputs.push(result.value as AccountInput);
+      }
+      // (rejected results already logged above inside each promise's catch)
+    });
 
     console.log(
       `[decompressIfNeeded] Found ${accountInputs.length} compressed account(s):`
@@ -559,10 +823,6 @@ export class MethodsBuilder<
       try {
         const pubkey = translateAddress(this._accounts[accountName] as Address);
         if (!pubkey.equals(programId)) {
-          console.log(
-            `[decompressIfNeeded] Using '${accountName}' from main instruction:`,
-            pubkey.toBase58()
-          );
           return pubkey;
         }
       } catch {
@@ -570,130 +830,6 @@ export class MethodsBuilder<
       }
     }
     return null;
-  }
-
-  /**
-   * Extract required seed accounts based on what's actually being decompressed
-   */
-  private _extractRequiredSeeds(accountInputs: AccountInput[]): Set<string> {
-    const requiredSeeds = new Set<string>();
-
-    // Helper to extract seed account names from IDL PDA definition
-    const extractSeedsFromIdl = (accountName: string): string[] => {
-      if (!this._idl) return [];
-
-      const findAccount = (accounts: readonly any[], name: string): any => {
-        for (const acc of accounts) {
-          if ("accounts" in acc) {
-            const found = findAccount(acc.accounts, name);
-            if (found) return found;
-          } else if (acc.name === accountName) {
-            return acc;
-          }
-        }
-        return null;
-      };
-
-      // Search all instructions for PDA definition
-      for (const ix of this._idl.instructions) {
-        const accountDef = findAccount(ix.accounts, accountName);
-        if (accountDef && accountDef.pda && accountDef.pda.seeds) {
-          const seeds: string[] = [];
-          for (const seed of accountDef.pda.seeds) {
-            if (seed.kind === "account" && seed.path) {
-              const baseName = seed.path.split(".")[0].split("(")[0];
-              seeds.push(baseName);
-            }
-          }
-          return seeds;
-        }
-      }
-      return [];
-    };
-
-    // Analyze each account being decompressed
-    for (const input of accountInputs) {
-      const accountName = input.tokenVariant || (input.accountType as string);
-
-      // Extract seeds from IDL for this account
-      const seeds = extractSeedsFromIdl(accountName);
-      for (const seed of seeds) {
-        requiredSeeds.add(seed);
-        console.log(
-          `[decompressIfNeeded] Account '${accountName}' requires seed: '${seed}' (from IDL)`
-        );
-      }
-    }
-
-    return requiredSeeds;
-  }
-
-  /**
-   * Get compressible account names from main instruction's IDL definition
-   */
-  private _getMainInstructionCompressibleAccounts(): Set<string> {
-    const compressible = new Set<string>();
-    if (!this._idl) return compressible;
-
-    // Find the main instruction in IDL
-    const mainIx = this._idl.instructions.find(
-      (ix: any) => ix.name === (this._idlIx as any).name
-    );
-    if (!mainIx) return compressible;
-
-    // Recursively scan all accounts
-    const visitAccounts = (items: readonly any[]) => {
-      for (const item of items) {
-        if ("accounts" in item) {
-          visitAccounts(item.accounts);
-          continue;
-        }
-        // Check the compressible field
-        if (item.compressible === true) {
-          compressible.add(item.name);
-        }
-      }
-    };
-
-    visitAccounts(mainIx.accounts);
-    return compressible;
-  }
-
-  /**
-   * Auto-pull accounts from main instruction for matching names
-   */
-  private _autoPullFromMainInstruction(): void {
-    if (!this._decompressAccounts) return;
-
-    const programId = this._programId;
-
-    // Helper to check if an account is missing or set to program ID (placeholder)
-    const isAccountMissing = (name: string): boolean => {
-      if (!this._decompressAccounts || !(name in this._decompressAccounts))
-        return true;
-      try {
-        const pubkey = translateAddress(
-          this._decompressAccounts![name] as Address
-        );
-        return pubkey.equals(programId);
-      } catch {
-        return true;
-      }
-    };
-
-    // Try to pull each missing account from main instruction
-    for (const accountName in this._decompressAccounts) {
-      if (isAccountMissing(accountName)) {
-        const fromMain = this._getFromMainInstruction(accountName);
-        if (fromMain) {
-          console.log(
-            `[decompressIfNeeded] Auto-pulling '${accountName}' from main instruction:`,
-            fromMain.toBase58()
-          );
-          this._decompressAccounts[accountName] = fromMain;
-        }
-      }
-    }
   }
 
   /**
@@ -782,6 +918,84 @@ export class MethodsBuilder<
       }
     }
 
+    // Auto-resolve feePayer with strict precedence order
+    if (isAccountMissing("feePayer")) {
+      let feePayer: PublicKey | null = null;
+
+      // Priority 1: Check main instruction (in case user explicitly passed it there)
+      const fromMain = this._getFromMainInstruction("feePayer");
+      if (fromMain) {
+        feePayer = fromMain;
+        console.log(
+          "[decompressIfNeeded] Using feePayer from main instruction:",
+          feePayer.toBase58()
+        );
+      }
+      // Priority 2: Try payer
+      const fromPayer = this._getFromMainInstruction("payer");
+      if (fromPayer) {
+        feePayer = fromPayer;
+        console.log(
+          "[decompressIfNeeded] Using payer as feePayer from main instruction:",
+          feePayer.toBase58()
+        );
+      }
+      // Priority 3: Use provider wallet
+      else {
+        try {
+          const provider = (this._accountsResolver as any)["_provider"];
+          const walletPubkey = provider?.wallet?.publicKey;
+          if (walletPubkey) {
+            feePayer = walletPubkey;
+            console.log(
+              "[decompressIfNeeded] Using provider wallet as feePayer (transaction signer):",
+              walletPubkey.toBase58()
+            );
+          }
+        } catch {
+          // Provider not available or doesn't have wallet
+        }
+      }
+
+      // Priority 3: Error - cannot proceed without feePayer
+      // Note: We do NOT fallback to "first instruction signer" because:
+      //   - Transaction feePayer ≠ Instruction signers
+      //   - First signer might be multisig authority, not the actual fee payer
+      //   - This would cause subtle bugs and is not robust
+      if (!feePayer) {
+        throw new Error(
+          `[decompressIfNeeded] Unable to determine feePayer for decompression.\n\n` +
+            `The feePayer pays transaction fees and must match the transaction signer.\n\n` +
+            `Solutions:\n` +
+            `  1. Provide explicitly: .decompressIfNeeded({ feePayer: <publicKey>, ... })\n` +
+            `  2. Ensure your provider has a wallet set (standard Anchor requirement)\n\n` +
+            `Note: The feePayer must be the transaction signer (provider.wallet), not just any instruction signer.`
+        );
+      }
+
+      this._decompressAccounts.feePayer = feePayer;
+    }
+
+    // Auto-resolve rentPayer (defaults to feePayer if not provided)
+    if (isAccountMissing("rentPayer")) {
+      // First check if feePayer was resolved
+      const feePayer = this._decompressAccounts.feePayer
+        ? translateAddress(this._decompressAccounts.feePayer as Address)
+        : null;
+
+      if (feePayer) {
+        console.log(
+          "[decompressIfNeeded] Defaulting rentPayer to feePayer:",
+          feePayer.toBase58()
+        );
+        this._decompressAccounts.rentPayer = feePayer;
+      } else {
+        throw new Error(
+          `[decompressIfNeeded] Unable to determine rentPayer (feePayer must be resolved first)`
+        );
+      }
+    }
+
     // Auto-resolve ctokenRentSponsor (check main instruction first, then fallback to feePayer)
     if (isAccountMissing("ctokenRentSponsor")) {
       const fromMain = this._getFromMainInstruction("ctokenRentSponsor");
@@ -815,6 +1029,9 @@ export class MethodsBuilder<
 
   /**
    * Internal method to inject decompress instruction if needed.
+   *
+   * Uses _lightMetadata (extracted from IDL enums) as canonical reference for all compressible accounts.
+   * Auto-resolves accounts by matching seed dependencies against main instruction accounts.
    */
   private async _injectDecompressIfNeeded(): Promise<void> {
     if (!this._enableAutoDecompress || !this._decompressAccounts) return;
@@ -822,6 +1039,16 @@ export class MethodsBuilder<
     if (!this._idl || !this._allInstructionFns) {
       console.warn(
         "[decompressIfNeeded] Missing IDL or instruction functions."
+      );
+      return;
+    }
+
+    if (
+      !this._lightMetadata ||
+      this._lightMetadata.compressibleAccounts.size === 0
+    ) {
+      console.log(
+        "[decompressIfNeeded] No compressible accounts metadata found in IDL. Skipping decompress."
       );
       return;
     }
@@ -838,9 +1065,14 @@ export class MethodsBuilder<
     }
 
     console.log("[decompressIfNeeded] Starting auto-decompression...");
+    console.log(
+      `[decompressIfNeeded] Using Light metadata with ${this._lightMetadata.compressibleAccounts.size} compressible account(s) as canonical reference`
+    );
 
-    // Known non-compressible system accounts to skip
-    const SKIP_ACCOUNTS = new Set([
+    const programId = this._programId;
+
+    // System accounts that are infrastructure (not compressible)
+    const SYSTEM_ACCOUNTS = new Set([
       "feePayer",
       "config",
       "rentPayer",
@@ -852,61 +1084,619 @@ export class MethodsBuilder<
       "ctokenCompressionAuthority",
     ]);
 
-    // Collect potentially compressible accounts
-    // Only check accounts that were explicitly provided (not set to programId placeholder)
-    const accountsToCheck: Array<{ name: string; address: PublicKey }> = [];
+    // Step 1: Auto-resolve constants and defaults for system accounts
+    this._autoResolveDecompressAccounts();
 
-    for (const [name, addr] of Object.entries(this._decompressAccounts)) {
-      if (SKIP_ACCOUNTS.has(name)) continue;
+    // Step 2: Use Light metadata to resolve ALL compressible accounts
+    const completeAccounts: Record<string, PublicKey> = {};
+    const compressibleAccountsToCheck: Array<{
+      name: string;
+      address: PublicKey;
+    }> = [];
+    const resolvedAddresses = new Set<string>(); // Track which addresses have been claimed
 
-      try {
-        const pubkey = translateAddress(addr as Address);
+    // First, resolve all compressible accounts from Light metadata
+    console.log(
+      `[decompressIfNeeded] Main instruction accounts available: [${
+        this._accounts ? Object.keys(this._accounts).join(", ") : "none"
+      }]`
+    );
 
-        // Skip accounts set to programId - these are explicitly marked as "None/not needed"
-        if (pubkey.equals(this._programId)) {
-          console.log(
-            `[decompressIfNeeded] Skipping account '${name}' (set to programId = None)`
+    for (const [
+      accountName,
+      metadata,
+    ] of this._lightMetadata.compressibleAccounts.entries()) {
+      console.log(
+        `\n[decompressIfNeeded] ===== Resolving '${accountName}' (${metadata.accountType}) =====`
+      );
+      let resolved: PublicKey | null = null;
+
+      // Priority 1: Check if explicitly provided in decompressIfNeeded()
+      if (accountName in this._decompressAccounts) {
+        try {
+          const provided = translateAddress(
+            this._decompressAccounts[accountName] as Address
           );
-          continue;
+          if (!provided.equals(programId)) {
+            resolved = provided;
+            console.log(
+              `[decompressIfNeeded] ✓ P1 Explicit: ${provided.toBase58()}`
+            );
+          }
+        } catch {
+          console.log(`[decompressIfNeeded] ✗ P1 Explicit: invalid address`);
         }
+      } else {
+        console.log(`[decompressIfNeeded] ✗ P1 Explicit: not provided`);
+      }
 
-        // All provided non-system, non-placeholder accounts should be checked
-        accountsToCheck.push({ name, address: pubkey });
-      } catch {
-        console.warn(
-          `[decompressIfNeeded] Invalid address for ${name}, skipping`
+      // Priority 2: Try name match from main instruction
+      if (!resolved) {
+        const fromMain = this._getFromMainInstruction(accountName);
+        if (fromMain) {
+          console.log(
+            `[decompressIfNeeded] ✓ P2 Name match: found in main instruction as '${accountName}' → ${fromMain.toBase58()}`
+          );
+          resolved = fromMain;
+        } else {
+          console.log(
+            `[decompressIfNeeded] ✗ P2 Name match: '${accountName}' not in main instruction`
+          );
+        }
+      }
+
+      // Priority 3: Use seed-based resolution with Light metadata
+      if (!resolved && metadata.seeds.length > 0) {
+        const seedsStr = metadata.seeds
+          .map((s) => (s.type === "const" ? `"${s.value}"` : s.value))
+          .join(", ");
+        console.log(
+          `[decompressIfNeeded] → P3 Seed-based: trying seeds [${seedsStr}]`
+        );
+
+        const resolveResult = this._resolveCompressibleAccountFromMetadata(
+          accountName,
+          metadata
+        );
+
+        if (resolveResult.found) {
+          resolved = resolveResult.address!;
+          console.log(
+            `[decompressIfNeeded] ✓ P3 Seed-based: resolved → ${resolved.toBase58()}`
+          );
+
+          // Store resolved seed accounts in completeAccounts
+          for (const [seedName, seedValue] of Object.entries(
+            resolveResult.seeds || {}
+          )) {
+            if (!(seedName in completeAccounts)) {
+              completeAccounts[seedName] = seedValue;
+              console.log(
+                `[decompressIfNeeded]   └─ seed '${seedName}' → ${seedValue.toBase58()}`
+              );
+            }
+          }
+        } else {
+          console.log(
+            `[decompressIfNeeded] ✗ P3 Seed-based: failed (seeds not found or derivation failed)`
+          );
+        }
+      } else if (!resolved && metadata.seeds.length === 0) {
+        console.log(
+          `[decompressIfNeeded] ✗ P3 Seed-based: no seeds defined for this account`
         );
       }
-    }
 
-    // Validate: All compressible accounts used by main instruction must be provided
-    const mainIxCompressible = this._getMainInstructionCompressibleAccounts();
-    const providedCompressible = new Set(accountsToCheck.map((a) => a.name));
-    const missing: string[] = [];
+      // Priority 4: Try brute-force matching by trying all combinations of accounts as seeds
+      if (!resolved && this._accounts) {
+        const numMainAccounts = Object.keys(this._accounts).length;
+        console.log(
+          `[decompressIfNeeded] → P4 Brute-force: trying all combinations with ${numMainAccounts} main account(s)...`
+        );
 
-    for (const accountName of Array.from(mainIxCompressible)) {
-      const inMain = this._getFromMainInstruction(accountName);
-      if (inMain && !providedCompressible.has(accountName)) {
-        // Main instruction uses this compressible account, but not checked for decompression
-        missing.push(accountName);
+        const mainAccountEntries = Object.entries(this._accounts);
+
+        if (metadata.accountType === "token" && metadata.seeds.length > 0) {
+          // For token accounts with seeds, try to derive using seed combinations
+          console.log(
+            `[decompressIfNeeded]   ├─ Token account with ${metadata.seeds.length} seed(s): trying seed combinations...`
+          );
+
+          const accountSeeds = metadata.seeds.filter(
+            (s) => s.type === "account"
+          );
+          const expectedSeedCount = accountSeeds.length;
+          const seedsStr = metadata.seeds
+            .map((s) => (s.type === "const" ? `"${s.value}"` : s.value))
+            .join(", ");
+          console.log(
+            `[decompressIfNeeded]   │  Need ${expectedSeedCount} account seed(s): [${seedsStr}]`
+          );
+
+          // Try all combinations of accounts as potential seeds
+          const tryDerivation = (
+            seedIndices: number[]
+          ): {
+            address: PublicKey;
+            seedMappings: Record<string, PublicKey>;
+          } | null => {
+            // Build seed buffers including const seeds in correct order
+            const seedBuffers: Buffer[] = [];
+            const seedMappings: Record<string, PublicKey> = {};
+            let accountSeedIdx = 0;
+
+            for (const seed of metadata.seeds) {
+              if (seed.type === "const") {
+                seedBuffers.push(Buffer.from(seed.value, "utf8"));
+              } else {
+                // Account seed - get from the combination
+                if (accountSeedIdx >= seedIndices.length) return null;
+                try {
+                  const pk = translateAddress(
+                    mainAccountEntries[
+                      seedIndices[accountSeedIdx]
+                    ][1] as Address
+                  );
+                  if (pk.equals(programId)) return null;
+                  seedBuffers.push(pk.toBuffer());
+                  // Track which seed name maps to which account
+                  seedMappings[seed.value] = pk;
+                } catch {
+                  return null;
+                }
+                accountSeedIdx++;
+              }
+            }
+
+            try {
+              const [derivedPda] = PublicKey.findProgramAddressSync(
+                seedBuffers,
+                programId
+              );
+
+              // Check if this derived PDA matches any main instruction account
+              // Skip if this address has already been claimed by another compressible account
+              if (resolvedAddresses.has(derivedPda.toBase58())) {
+                return null; // Already used, skip this combination
+              }
+
+              for (const [mainAccName, mainAccValue] of mainAccountEntries) {
+                try {
+                  const mainPubkey = translateAddress(mainAccValue as Address);
+                  if (derivedPda.equals(mainPubkey)) {
+                    const seedNames = seedIndices.map(
+                      (i) => mainAccountEntries[i][0]
+                    );
+                    console.log(
+                      `[decompressIfNeeded]   │  → Derived token with seeds [${seedNames.join(
+                        ", "
+                      )}] → ${derivedPda.toBase58()}`
+                    );
+                    return { address: derivedPda, seedMappings };
+                  }
+                } catch {}
+              }
+            } catch {}
+            return null;
+          };
+
+          // Generate combinations
+          const generateCombinations = (
+            arr: number[],
+            k: number
+          ): number[][] => {
+            if (k === 0) return [[]];
+            if (arr.length === 0) return [];
+            const [first, ...rest] = arr;
+            const withFirst = generateCombinations(rest, k - 1).map((c) => [
+              first,
+              ...c,
+            ]);
+            const withoutFirst = generateCombinations(rest, k);
+            return [...withFirst, ...withoutFirst];
+          };
+
+          const accountIndices = Array.from(
+            { length: mainAccountEntries.length },
+            (_, i) => i
+          );
+          const combinations = generateCombinations(
+            accountIndices,
+            expectedSeedCount
+          );
+
+          console.log(
+            `[decompressIfNeeded]   │  Trying ${combinations.length} token seed combinations...`
+          );
+
+          for (const combo of combinations) {
+            const result = tryDerivation(combo);
+            if (result) {
+              resolved = result.address;
+              resolvedAddresses.add(result.address.toBase58());
+
+              // Store the seed mappings in completeAccounts
+              for (const [seedName, seedValue] of Object.entries(
+                result.seedMappings
+              )) {
+                if (!(seedName in completeAccounts)) {
+                  completeAccounts[seedName] = seedValue;
+                  console.log(
+                    `[decompressIfNeeded]   │  → Collected seed: '${seedName}' = ${seedValue.toBase58()}`
+                  );
+                }
+              }
+
+              console.log(
+                `[decompressIfNeeded]   └─ ✓ P4 Brute-force: found match for token '${accountName}'`
+              );
+              break;
+            }
+          }
+        } else if (
+          metadata.accountType === "pda" &&
+          metadata.seeds.length > 0
+        ) {
+          // For PDA accounts, try all seed combinations
+          console.log(
+            `[decompressIfNeeded]   ├─ PDA account: trying seed combinations...`
+          );
+
+          const accountSeeds = metadata.seeds.filter(
+            (s) => s.type === "account"
+          );
+          const expectedSeedCount = accountSeeds.length;
+          const seedsStr = metadata.seeds
+            .map((s) => (s.type === "const" ? `"${s.value}"` : s.value))
+            .join(", ");
+          console.log(
+            `[decompressIfNeeded]   │  Need ${expectedSeedCount} account seed(s): [${seedsStr}]`
+          );
+
+          // Try all permutations of accounts as potential seeds
+          const tryDerivation = (
+            seedIndices: number[]
+          ): {
+            address: PublicKey;
+            seedMappings: Record<string, PublicKey>;
+          } | null => {
+            // Build seed buffers including const seeds in correct order
+            const seedBuffers: Buffer[] = [];
+            const seedMappings: Record<string, PublicKey> = {};
+            let accountSeedIdx = 0;
+
+            for (const seed of metadata.seeds) {
+              if (seed.type === "const") {
+                seedBuffers.push(Buffer.from(seed.value, "utf8"));
+              } else {
+                // Account seed - get from the combination
+                if (accountSeedIdx >= seedIndices.length) return null;
+                try {
+                  const pk = translateAddress(
+                    mainAccountEntries[
+                      seedIndices[accountSeedIdx]
+                    ][1] as Address
+                  );
+                  if (pk.equals(programId)) return null;
+                  seedBuffers.push(pk.toBuffer());
+                  // Track which seed name maps to which account
+                  seedMappings[seed.value] = pk;
+                } catch {
+                  return null;
+                }
+                accountSeedIdx++;
+              }
+            }
+
+            try {
+              const [derivedPda] = PublicKey.findProgramAddressSync(
+                seedBuffers,
+                programId
+              );
+
+              // Check if this derived PDA matches any main instruction account
+              // Skip if this address has already been claimed by another compressible account
+              if (resolvedAddresses.has(derivedPda.toBase58())) {
+                return null; // Already used, skip this combination
+              }
+
+              for (const [mainAccName, mainAccValue] of mainAccountEntries) {
+                try {
+                  const mainPubkey = translateAddress(mainAccValue as Address);
+                  if (derivedPda.equals(mainPubkey)) {
+                    const seedNames = seedIndices.map(
+                      (i) => mainAccountEntries[i][0]
+                    );
+                    console.log(
+                      `[decompressIfNeeded]   │  → Derived PDA with seeds [${seedNames.join(
+                        ", "
+                      )}] → ${derivedPda.toBase58()}`
+                    );
+                    return { address: derivedPda, seedMappings };
+                  }
+                } catch {}
+              }
+            } catch {}
+            return null;
+          };
+
+          // Generate combinations of seed indices
+          const generateCombinations = (
+            arr: number[],
+            k: number
+          ): number[][] => {
+            if (k === 0) return [[]];
+            if (arr.length === 0) return [];
+            const [first, ...rest] = arr;
+            const withFirst = generateCombinations(rest, k - 1).map((c) => [
+              first,
+              ...c,
+            ]);
+            const withoutFirst = generateCombinations(rest, k);
+            return [...withFirst, ...withoutFirst];
+          };
+
+          const accountIndices = Array.from(
+            { length: mainAccountEntries.length },
+            (_, i) => i
+          );
+          const combinations = generateCombinations(
+            accountIndices,
+            expectedSeedCount
+          );
+
+          console.log(
+            `[decompressIfNeeded]   │  Trying ${combinations.length} PDA seed combinations...`
+          );
+
+          for (const combo of combinations) {
+            const result = tryDerivation(combo);
+            if (result) {
+              resolved = result.address;
+              resolvedAddresses.add(result.address.toBase58());
+
+              // Store the seed mappings in completeAccounts
+              for (const [seedName, seedValue] of Object.entries(
+                result.seedMappings
+              )) {
+                if (!(seedName in completeAccounts)) {
+                  completeAccounts[seedName] = seedValue;
+                  console.log(
+                    `[decompressIfNeeded]   │  → Collected seed: '${seedName}' = ${seedValue.toBase58()}`
+                  );
+                }
+              }
+
+              console.log(
+                `[decompressIfNeeded]   └─ ✓ P4 Brute-force: found match for PDA '${accountName}'`
+              );
+              break;
+            }
+          }
+        } else {
+          // No seeds defined - try generic name-based fuzzy matching
+          console.log(
+            `[decompressIfNeeded]   ├─ No seeds - trying fuzzy name matching...`
+          );
+
+          // Extract the core name parts for matching (e.g., "pool" from "pool_state", "observation" from "observation_state")
+          const accountNameParts = accountName
+            .split("_")
+            .filter((p) => p.length > 2);
+
+          for (const [mainAccName, mainAccValue] of mainAccountEntries) {
+            try {
+              const mainPubkey = translateAddress(mainAccValue as Address);
+              if (mainPubkey.equals(programId)) continue;
+
+              const mainSnakeName = mainAccName
+                .replace(/([A-Z])/g, "_$1")
+                .toLowerCase()
+                .replace(/^_/, "");
+
+              // Check exact match
+              if (mainSnakeName === accountName) {
+                resolved = mainPubkey;
+                console.log(
+                  `[decompressIfNeeded]   └─ ✓ P4 Exact name match: '${accountName}' → '${mainAccName}' → ${mainPubkey.toBase58()}`
+                );
+                break;
+              }
+
+              // Check if main account name contains core parts of the compressible account name
+              const matchScore = accountNameParts.filter((part) =>
+                mainSnakeName.includes(part)
+              ).length;
+
+              if (
+                matchScore > 0 &&
+                matchScore / accountNameParts.length >= 0.5
+              ) {
+                resolved = mainPubkey;
+                console.log(
+                  `[decompressIfNeeded]   └─ ✓ P4 Fuzzy name match: '${accountName}' → '${mainAccName}' (${matchScore}/${
+                    accountNameParts.length
+                  } parts) → ${mainPubkey.toBase58()}`
+                );
+                break;
+              }
+            } catch {}
+          }
+        }
+
+        if (!resolved) {
+          console.log(
+            `[decompressIfNeeded]   └─ ✗ P4 Brute-force: no match found`
+          );
+        }
+      }
+
+      if (resolved) {
+        completeAccounts[accountName] = resolved;
+        compressibleAccountsToCheck.push({
+          name: accountName,
+          address: resolved,
+        });
+        resolvedAddresses.add(resolved.toBase58()); // Mark this address as claimed
+        console.log(
+          `[decompressIfNeeded] ✓✓ RESOLVED '${accountName}' → ${resolved.toBase58()}`
+        );
+
+        // IMPORTANT: Now collect the seeds for this account (if any)
+        // Seeds are required accounts in the decompress instruction
+        if (metadata.seeds.length > 0) {
+          console.log(
+            `[decompressIfNeeded]   → Collecting seeds for '${accountName}'...`
+          );
+          for (const seed of metadata.seeds) {
+            if (seed.type === "account") {
+              const seedName = seed.value;
+
+              // Skip if we already collected this seed
+              if (seedName in completeAccounts) {
+                console.log(
+                  `[decompressIfNeeded]   │  ✓ seed '${seedName}': already collected`
+                );
+                continue;
+              }
+
+              let seedValue: PublicKey | null = null;
+
+              // Try to resolve the seed account
+              // 1. Check if explicitly provided
+              if (
+                this._decompressAccounts &&
+                seedName in this._decompressAccounts
+              ) {
+                try {
+                  const provided = translateAddress(
+                    this._decompressAccounts[seedName] as Address
+                  );
+                  if (!provided.equals(programId)) {
+                    seedValue = provided;
+                    console.log(
+                      `[decompressIfNeeded]   │  ✓ seed '${seedName}': explicit → ${seedValue.toBase58()}`
+                    );
+                  }
+                } catch {}
+              }
+
+              // 2. Check if in main instruction
+              if (!seedValue) {
+                seedValue = this._getFromMainInstruction(seedName);
+                if (seedValue) {
+                  console.log(
+                    `[decompressIfNeeded]   │  ✓ seed '${seedName}': from main → ${seedValue.toBase58()}`
+                  );
+                }
+              }
+
+              // 3. REQUIRED: All seeds for resolved compressible accounts MUST be found
+              if (!seedValue) {
+                throw new Error(
+                  `[decompressIfNeeded] Compressible account '${accountName}' is being decompressed, ` +
+                    `but its required seed account '${seedName}' could not be resolved.\n\n` +
+                    `This account is required because '${accountName}' is explicitly provided or found in the instruction.\n\n` +
+                    `Solutions:\n` +
+                    `  1. Provide it explicitly: .decompressIfNeeded({ ${seedName}: <publicKey>, ... })\n` +
+                    `  2. Include it in the main instruction accounts\n` +
+                    `  3. If '${accountName}' is not needed for this instruction, don't provide it explicitly\n\n` +
+                    `Note: '${seedName}' may be a field reference - ensure the field's value is passed as a PublicKey.`
+                );
+              }
+              completeAccounts[seedName] = seedValue;
+            }
+          }
+        }
+      } else {
+        // Not resolved - treat as unused (set to program ID / None)
+        console.log(
+          `[decompressIfNeeded] ✗✗ FAILED to resolve '${accountName}' - treating as unused (None)`
+        );
+        completeAccounts[accountName] = programId;
       }
     }
 
-    if (missing.length > 0) {
-      throw new Error(
-        `[decompressIfNeeded] Missing compressible accounts used by main instruction: ${missing.join(
-          ", "
-        )}.\n` +
-          `These accounts are marked as compressible in the IDL and must be provided to decompressIfNeeded().\n` +
-          `Add them: .decompressIfNeeded({ ..., ${missing
-            .map((n) => `${n}: <address>`)
-            .join(", ")} })`
-      );
+    // Step 3: Process remaining non-compressible decompress accounts (system accounts, optional accounts)
+    for (const acc of decompressInstruction.accounts || []) {
+      const accountName = typeof acc === "string" ? acc : acc.name;
+      const isOptional =
+        typeof acc !== "string" &&
+        !("accounts" in acc) &&
+        (acc as IdlInstructionAccount).optional === true;
+      const isSystemAccount = SYSTEM_ACCOUNTS.has(accountName);
+
+      // Skip if already resolved (either compressible account or collected seed)
+      if (accountName in completeAccounts) {
+        console.log(
+          `[decompressIfNeeded] ✓ '${accountName}' already resolved (collected from seed resolution):`,
+          completeAccounts[accountName].toBase58()
+        );
+        continue;
+      }
+
+      let resolved: PublicKey | null = null;
+
+      // Check explicit value
+      if (accountName in this._decompressAccounts) {
+        try {
+          const provided = translateAddress(
+            this._decompressAccounts[accountName] as Address
+          );
+          if (!provided.equals(programId)) {
+            resolved = provided;
+            console.log(
+              `[decompressIfNeeded] Using explicit value for '${accountName}':`,
+              provided.toBase58()
+            );
+          }
+        } catch {}
+      }
+
+      // Check main instruction
+      if (!resolved) {
+        const fromMain = this._getFromMainInstruction(accountName);
+        if (fromMain) {
+          console.log(
+            `[decompressIfNeeded] Auto-pulling '${accountName}' from main instruction:`,
+            fromMain.toBase58()
+          );
+          resolved = fromMain;
+        }
+      }
+
+      // Set to programId (None) if still not resolved
+      if (!resolved) {
+        if (!isOptional && !isSystemAccount) {
+          throw new Error(
+            `[decompressIfNeeded] Required account '${accountName}' is missing.\n` +
+              `Please provide it explicitly: .decompressIfNeeded({ ..., ${accountName}: <publicKey> })`
+          );
+        }
+        console.log(
+          `[decompressIfNeeded] Account '${accountName}' not found - treating as unused (None)`
+        );
+        resolved = programId;
+      }
+
+      completeAccounts[accountName] = resolved;
     }
 
-    // Fetch compression state for all accounts
+    console.log(
+      `[decompressIfNeeded] Resolved ${
+        Object.keys(completeAccounts).length
+      } total accounts for decompress instruction`
+    );
+    console.log(
+      `[decompressIfNeeded] Will check compression state for ${compressibleAccountsToCheck.length} resolved compressible account(s):`
+    );
+    compressibleAccountsToCheck.forEach((acc, idx) => {
+      console.log(`  [${idx + 1}] ${acc.name} → ${acc.address.toBase58()}`);
+    });
+
+    // Step 4: Fetch compression state for all potentially compressible accounts
     const accountInputs = await this._fetchCompressibleAccounts(
-      accountsToCheck
+      compressibleAccountsToCheck
     );
 
     if (accountInputs.length === 0) {
@@ -916,27 +1706,23 @@ export class MethodsBuilder<
       return;
     }
 
-    // Build decompress params
-    const programId = this._programId;
+    // Step 5: Build decompress params
     const rpc = createRpc();
-
     console.log(
       `[decompressIfNeeded] Building decompress params for ${accountInputs.length} compressed account(s)`
     );
+
     console.log(
-      `[decompressIfNeeded] Calling buildDecompressParams with inputs:`,
-      // JSON.stringify(
-      accountInputs.map((ai: any) => ({
-        address: ai.address.toBase58(),
-        accountType: ai.accountType,
-        info: ai.info,
-        tokenVariant: ai.tokenVariant || undefined,
-      }))
-      // null,
-      // 2
-      // )
+      "accountInputs",
+      accountInputs.map((acc) => acc)
     );
     const params = await buildDecompressParams(programId, rpc, accountInputs);
+
+    console.log("params", params);
+    console.log(
+      "params",
+      params?.compressedAccounts.map((acc) => JSON.stringify(acc))
+    );
 
     if (!params) {
       console.log("[decompressIfNeeded] buildDecompressParams returned null.");
@@ -946,15 +1732,8 @@ export class MethodsBuilder<
     console.log(
       `[decompressIfNeeded] Built params with ${params.compressedAccounts.length} compressed account(s), ${params.remainingAccounts.length} remaining account(s)`
     );
-    console.log(
-      `[decompressIfNeeded] compressedAccounts:`,
-      JSON.stringify(params.compressedAccounts, null, 2)
-    );
-    console.log(
-      `[decompressIfNeeded] systemAccountsOffset: ${params.systemAccountsOffset}`
-    );
 
-    // Build the decompress instruction
+    // Step 6: Build and inject the decompress instruction
     const decompressIxFn = this._allInstructionFns[
       "decompressAccountsIdempotent"
     ] as InstructionFn<IDL, DecompressInstruction<IDL>>;
@@ -965,66 +1744,6 @@ export class MethodsBuilder<
       );
       return;
     }
-
-    // Auto-resolve constant and default accounts before validation
-    this._autoResolveDecompressAccounts();
-
-    // Determine which seed accounts are required based on what's being decompressed
-    const requiredSeeds = this._extractRequiredSeeds(accountInputs);
-    console.log(
-      `[decompressIfNeeded] Required seeds for decompression:`,
-      Array.from(requiredSeeds)
-    );
-
-    // Auto-pull required seeds from main instruction
-    for (const seedName of Array.from(requiredSeeds)) {
-      if (
-        !(seedName in this._decompressAccounts) ||
-        translateAddress(this._decompressAccounts[seedName] as Address).equals(
-          programId
-        )
-      ) {
-        const fromMain = this._getFromMainInstruction(seedName);
-        if (fromMain) {
-          console.log(
-            `[decompressIfNeeded] Auto-pulling required seed '${seedName}' from main instruction:`,
-            fromMain.toBase58()
-          );
-          this._decompressAccounts[seedName] = fromMain;
-        } else {
-          throw new Error(
-            `[decompressIfNeeded] Required seed account '${seedName}' is missing. ` +
-              `It's needed for decompressing but not found in main instruction. ` +
-              `Please provide it explicitly in decompressIfNeeded() call.`
-          );
-        }
-      }
-    }
-
-    // Fill in any missing accounts with program ID (represents "None" for optional accounts)
-    // Only fill accounts that are NOT required seeds
-    const completeAccounts = { ...this._decompressAccounts };
-    const decompressIxAccounts = decompressInstruction.accounts || [];
-
-    for (const acc of decompressIxAccounts) {
-      const accountName = typeof acc === "string" ? acc : acc.name;
-      if (!(accountName in completeAccounts)) {
-        if (requiredSeeds.has(accountName)) {
-          throw new Error(
-            `[decompressIfNeeded] Required seed account '${accountName}' is missing.`
-          );
-        }
-        console.log(
-          `[decompressIfNeeded] Auto-filling optional account '${accountName}' with program ID (not needed for current decompression)`
-        );
-        completeAccounts[accountName] = programId;
-      }
-    }
-
-    console.log(
-      `[decompressIfNeeded] Building instruction with accounts:`,
-      Object.keys(completeAccounts)
-    );
 
     let decompressIx;
     try {
@@ -1051,6 +1770,169 @@ export class MethodsBuilder<
 
     // Prepend decompress instruction
     this.preInstructions([decompressIx], true);
+  }
+
+  /**
+   * Resolve a compressible account using Light metadata seed dependencies.
+   * Tries to find seed accounts in main instruction and derive the target account.
+   */
+  private _resolveCompressibleAccountFromMetadata(
+    accountName: string,
+    metadata: {
+      accountType: "pda" | "token";
+      seeds: Array<{ type: "const" | "account"; value: string }>;
+    }
+  ): {
+    found: boolean;
+    address?: PublicKey;
+    seeds?: Record<string, PublicKey>;
+  } {
+    const programId = this._programId;
+    const seedsResolved: Record<string, PublicKey> = {};
+    const seedBuffers: Buffer[] = [];
+
+    // Try to resolve all seeds (both const and account)
+    const accountSeeds = metadata.seeds.filter((s) => s.type === "account");
+    console.log(
+      `[decompressIfNeeded]   ├─ Resolving ${accountSeeds.length} account seed(s) for '${accountName}'...`
+    );
+
+    // Process each seed in order (preserving const and account seeds)
+    for (const seed of metadata.seeds) {
+      if (seed.type === "const") {
+        // Const seed - add directly to seed buffers
+        seedBuffers.push(Buffer.from(seed.value, "utf8"));
+        console.log(`[decompressIfNeeded]   │  ✓ const seed: "${seed.value}"`);
+      } else {
+        // Account seed - need to resolve it
+        const seedName = seed.value;
+        let seedValue: PublicKey | null = null;
+
+        // Check if seed is explicitly provided
+        if (this._decompressAccounts && seedName in this._decompressAccounts) {
+          try {
+            const provided = translateAddress(
+              this._decompressAccounts[seedName] as Address
+            );
+            if (!provided.equals(programId)) {
+              seedValue = provided;
+              console.log(
+                `[decompressIfNeeded]   │  ✓ account seed '${seedName}': explicit → ${seedValue.toBase58()}`
+              );
+            }
+          } catch {}
+        }
+
+        // Check if seed is in main instruction
+        if (!seedValue) {
+          seedValue = this._getFromMainInstruction(seedName);
+          if (seedValue) {
+            console.log(
+              `[decompressIfNeeded]   │  ✓ account seed '${seedName}': from main → ${seedValue.toBase58()}`
+            );
+          }
+        }
+
+        if (!seedValue) {
+          console.log(
+            `[decompressIfNeeded]   │  ✗ account seed '${seedName}': NOT FOUND`
+          );
+          return { found: false };
+        }
+
+        seedsResolved[seedName] = seedValue;
+        seedBuffers.push(seedValue.toBuffer());
+      }
+    }
+
+    // All seeds found - now derive the account
+    console.log(
+      `[decompressIfNeeded]   ├─ All seeds resolved. Deriving ${metadata.accountType}...`
+    );
+
+    try {
+      if (metadata.accountType === "pda") {
+        // Derive PDA using all seed buffers (const + account)
+        const [derivedPda] = PublicKey.findProgramAddressSync(
+          seedBuffers,
+          programId
+        );
+        console.log(
+          `[decompressIfNeeded]   │  → Derived PDA: ${derivedPda.toBase58()}`
+        );
+
+        // Check if this matches any account in main instruction
+        if (this._accounts) {
+          for (const [mainAccName, mainAccValue] of Object.entries(
+            this._accounts
+          )) {
+            try {
+              const mainPubkey = translateAddress(mainAccValue as Address);
+              if (mainPubkey.equals(derivedPda)) {
+                console.log(
+                  `[decompressIfNeeded]   └─ ✓ Match found: derived PDA equals main account '${mainAccName}'`
+                );
+                return {
+                  found: true,
+                  address: derivedPda,
+                  seeds: seedsResolved,
+                };
+              }
+            } catch {}
+          }
+        }
+
+        // Even if not in main instruction, we successfully derived it
+        console.log(
+          `[decompressIfNeeded]   └─ ✓ PDA derived (not found in main instruction, but usable)`
+        );
+        return { found: true, address: derivedPda, seeds: seedsResolved };
+      } else if (metadata.accountType === "token") {
+        // For token accounts (compressed token vaults), derive the actual PDA
+        // Token vaults are PDAs: PDA[const_seed, ...account_seeds]
+        const [derivedTokenVault] = PublicKey.findProgramAddressSync(
+          seedBuffers,
+          programId
+        );
+        console.log(
+          `[decompressIfNeeded]   │  → Derived token vault PDA: ${derivedTokenVault.toBase58()}`
+        );
+
+        // Check if this derived address matches any account in main instruction
+        if (this._accounts) {
+          for (const [mainAccName, mainAccValue] of Object.entries(
+            this._accounts
+          )) {
+            try {
+              const mainPubkey = translateAddress(mainAccValue as Address);
+              if (mainPubkey.equals(derivedTokenVault)) {
+                console.log(
+                  `[decompressIfNeeded]   └─ ✓ Match found: derived token vault equals main account '${mainAccName}'`
+                );
+                return {
+                  found: true,
+                  address: derivedTokenVault,
+                  seeds: seedsResolved,
+                };
+              }
+            } catch {}
+          }
+        }
+
+        // Token vault not found in main instruction - this is expected if it's not used
+        console.log(
+          `[decompressIfNeeded]   └─ ✗ Derived token vault not found in main instruction`
+        );
+      }
+    } catch (error) {
+      console.log(
+        `[decompressIfNeeded]   └─ ✗ Derivation failed: ${
+          (error as Error).message
+        }`
+      );
+    }
+
+    return { found: false };
   }
 
   /**
