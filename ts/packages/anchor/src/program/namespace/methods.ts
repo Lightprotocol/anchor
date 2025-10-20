@@ -1588,8 +1588,110 @@ export class MethodsBuilder<
                 }
               }
 
-              // 3. REQUIRED: All seeds for resolved compressible accounts MUST be found
+              if (!seedValue && this._accounts) {
+                const seedNameLower = seedName.toLowerCase();
+                const seedNameSnake = seedName
+                  .replace(/([A-Z])/g, "_$1")
+                  .toLowerCase()
+                  .replace(/^_/, "");
+
+                for (const [mainAccName, mainAccValue] of Object.entries(
+                  this._accounts
+                )) {
+                  try {
+                    const mainPubkey = translateAddress(
+                      mainAccValue as Address
+                    );
+                    if (mainPubkey.equals(programId)) continue;
+
+                    const mainNameLower = mainAccName.toLowerCase();
+                    const mainNameSnake = mainAccName
+                      .replace(/([A-Z])/g, "_$1")
+                      .toLowerCase()
+                      .replace(/^_/, "");
+
+                    // Strategy 1: Exact match (case-insensitive)
+                    if (seedNameLower === mainNameLower) {
+                      seedValue = mainPubkey;
+                      console.log(
+                        `[decompressIfNeeded]   │  ✓ seed '${seedName}': case-insensitive match '${mainAccName}' → ${seedValue.toBase58()}`
+                      );
+                      break;
+                    }
+
+                    // Strategy 2: Snake case equivalents match
+                    if (seedNameSnake === mainNameSnake) {
+                      seedValue = mainPubkey;
+                      console.log(
+                        `[decompressIfNeeded]   │  ✓ seed '${seedName}': snake_case match '${mainAccName}' → ${seedValue.toBase58()}`
+                      );
+                      break;
+                    }
+                  } catch {}
+                }
+              }
+
+              // 4. Check if already collected in completeAccounts
+              if (!seedValue && seedName in completeAccounts) {
+                seedValue = completeAccounts[seedName];
+                console.log(
+                  `[decompressIfNeeded]   │  ✓ seed '${seedName}': found in completeAccounts → ${seedValue.toBase58()}`
+                );
+              }
+
+              // 5. Try brute-force mapping of unresolved seeds by deriving the target account
+              if (!seedValue && resolved) {
+                // Build knownSeedValues for this account only
+                const knownSeedValues: Record<string, PublicKey> = {};
+                for (const s of metadata.seeds) {
+                  if (s.type === "account") {
+                    const nm = s.value;
+                    if (nm in completeAccounts) {
+                      try {
+                        knownSeedValues[nm] = translateAddress(
+                          completeAccounts[nm] as Address
+                        );
+                      } catch {
+                        // already PublicKey
+                        knownSeedValues[nm] = completeAccounts[nm];
+                      }
+                    }
+                  }
+                }
+
+                const mapping = this._bruteForceResolveSeedAccounts(
+                  accountName,
+                  metadata,
+                  resolved,
+                  knownSeedValues
+                );
+
+                if (mapping) {
+                  for (const [nm, pk] of Object.entries(mapping)) {
+                    if (!(nm in completeAccounts)) {
+                      completeAccounts[nm] = pk;
+                      console.log(
+                        `[decompressIfNeeded]   │  ✓ seed '${nm}': brute-force → ${pk.toBase58()}`
+                      );
+                    }
+                  }
+                  if (seedName in mapping) {
+                    seedValue = mapping[seedName];
+                  }
+                }
+              }
+
+              // 6. REQUIRED: All seeds for resolved compressible accounts MUST be found
               if (!seedValue) {
+                // Log what we have to help debugging
+                console.log(
+                  `[decompressIfNeeded]   │  ✗ seed '${seedName}': NOT FOUND`
+                );
+                console.log(
+                  `[decompressIfNeeded]   │  Available main instruction accounts: ${
+                    Object.keys(this._accounts || {}).join(", ") || "none"
+                  }`
+                );
                 throw new Error(
                   `[decompressIfNeeded] Compressible account '${accountName}' is being decompressed, ` +
                     `but its required seed account '${seedName}' could not be resolved.\n\n` +
@@ -1930,6 +2032,133 @@ export class MethodsBuilder<
     }
 
     return { found: false };
+  }
+
+  /**
+   * Brute-force resolution for missing seed accounts by deriving the target account
+   * using candidate assignments for unresolved seeds and matching against the
+   * already-resolved target address.
+   */
+  private _bruteForceResolveSeedAccounts(
+    accountName: string,
+    metadata: {
+      accountType: "pda" | "token";
+      seeds: Array<{ type: "const" | "account"; value: string }>;
+    },
+    targetAddress: PublicKey,
+    knownSeedValues: Record<string, PublicKey>
+  ): Record<string, PublicKey> | null {
+    const programId = this._programId;
+
+    // Collect unresolved seed names (in order of appearance)
+    const unresolvedSeeds: string[] = [];
+    for (const seed of metadata.seeds) {
+      if (seed.type === "account") {
+        const name = seed.value;
+        if (!knownSeedValues[name]) {
+          unresolvedSeeds.push(name);
+        }
+      }
+    }
+
+    if (unresolvedSeeds.length === 0) {
+      return {};
+    }
+
+    const mainAccountEntries = Object.entries(this._accounts || {});
+
+    // Build candidate indices from main accounts
+    const candidateIndices: number[] = [];
+    for (let i = 0; i < mainAccountEntries.length; i++) {
+      try {
+        const pk = translateAddress(mainAccountEntries[i][1] as Address);
+        // Exclude placeholders (program id)
+        if (!pk.equals(programId)) {
+          candidateIndices.push(i);
+        }
+      } catch {}
+    }
+
+    // Helper: generate permutations (ordered selections without repetition)
+    const generatePermutations = (arr: number[], k: number): number[][] => {
+      if (k === 0) return [[]];
+      const results: number[][] = [];
+      const backtrack = (path: number[], used: boolean[]) => {
+        if (path.length === k) {
+          results.push(path.slice());
+          return;
+        }
+        for (let idx = 0; idx < arr.length; idx++) {
+          if (used[idx]) continue;
+          used[idx] = true;
+          path.push(arr[idx]);
+          backtrack(path, used);
+          path.pop();
+          used[idx] = false;
+        }
+      };
+      backtrack([], new Array(arr.length).fill(false));
+      return results;
+    };
+
+    const permutations = generatePermutations(
+      candidateIndices,
+      unresolvedSeeds.length
+    );
+
+    // For each permutation, assign candidates to unresolved seeds (in order),
+    // build the seed buffers and derive. If it matches the target address, we
+    // found the mapping.
+    let foundMapping: Record<string, PublicKey> | null = null;
+    for (const perm of permutations) {
+      const assignment: Record<string, PublicKey> = {};
+      let unresolvedIdx = 0;
+      const seedBuffers: Buffer[] = [];
+
+      let valid = true;
+      for (const seed of metadata.seeds) {
+        if (seed.type === "const") {
+          seedBuffers.push(Buffer.from(seed.value, "utf8"));
+        } else {
+          const name = seed.value;
+          let valuePk: PublicKey | null = null;
+          if (knownSeedValues[name]) {
+            valuePk = knownSeedValues[name];
+          } else {
+            // Assign from permutation
+            const candIndex = perm[unresolvedIdx++];
+            try {
+              valuePk = translateAddress(
+                mainAccountEntries[candIndex][1] as Address
+              );
+            } catch {
+              valid = false;
+            }
+            if (!valuePk) valid = false;
+            if (!valid) break;
+            assignment[name] = valuePk!;
+          }
+          seedBuffers.push(valuePk!.toBuffer());
+        }
+      }
+      if (!valid) continue;
+
+      try {
+        const [derived] = PublicKey.findProgramAddressSync(
+          seedBuffers,
+          programId
+        );
+        if (derived.equals(targetAddress)) {
+          if (foundMapping) {
+            // Ambiguous mapping - multiple solutions. Bail to avoid false positives.
+            return null;
+          }
+          foundMapping = assignment;
+        }
+      } catch {}
+    }
+
+    return foundMapping;
   }
 
   /**
