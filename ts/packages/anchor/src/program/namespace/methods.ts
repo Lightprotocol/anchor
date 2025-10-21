@@ -56,7 +56,9 @@ import {
   buildDecompressParams,
   CompressedTokenProgram,
   getAccountInterface,
+  getAtaInterface,
   CTOKEN_RENT_SPONSOR,
+  getAssociatedCTokenAddressAndBump,
 } from "@lightprotocol/compressed-token";
 
 featureFlags.version = VERSION.V2;
@@ -74,6 +76,7 @@ interface LightCompressibleMetadata {
     string,
     {
       accountType: "pda" | "token";
+      isATA?: boolean;
       seeds: Array<{ type: "const" | "account"; value: string }>;
     }
   >;
@@ -92,6 +95,7 @@ function extractLightMetadata(idl: Idl): LightCompressibleMetadata | null {
     string,
     {
       accountType: "pda" | "token";
+      isATA?: boolean;
       seeds: Array<{ type: "const" | "account"; value: string }>;
     }
   >();
@@ -181,9 +185,11 @@ function extractLightMetadata(idl: Idl): LightCompressibleMetadata | null {
       const variantName = variant.name; // Keep camelCase from IDL
 
       const seeds = extractPdaSeeds(variantName);
+      const isATA = seeds.length === 0; // ATAs have no PDA seeds
 
       compressibleAccounts.set(variantName, {
         accountType: "token",
+        isATA,
         seeds,
       });
     }
@@ -230,6 +236,7 @@ function extractLightMetadata(idl: Idl): LightCompressibleMetadata | null {
       seenBaseNames.add(baseName);
       compressibleAccounts.set(baseName, {
         accountType: "pda",
+        isATA: false,
         seeds,
       });
     }
@@ -405,6 +412,10 @@ export class MethodsBuilder<
   private _programId: PublicKey;
   private _accountNamespace: AccountNamespace<IDL>;
   private _lightMetadata?: LightCompressibleMetadata | null;
+  private _ataDerivations: Record<
+    string,
+    { owner: PublicKey; mint: PublicKey }
+  > = {};
 
   constructor(
     private _args: Array<any>,
@@ -629,9 +640,16 @@ export class MethodsBuilder<
   /**
    * Fetch and check compression state for provided accounts.
    * Returns AccountInput[] for buildDecompressParams.
+   *
+   * For ATA variants (seedless tokens), derives owner+mint from main instruction
+   * and queries by owner+mint instead of address.
    */
   private async _fetchCompressibleAccounts(
-    accountsToCheck: Array<{ name: string; address: PublicKey }>
+    accountsToCheck: Array<{
+      name: string;
+      address: PublicKey;
+      ataDerivation?: { owner: PublicKey; mint: PublicKey };
+    }>
   ): Promise<AccountInput[]> {
     if (accountsToCheck.length === 0) return [];
 
@@ -645,148 +663,206 @@ export class MethodsBuilder<
     );
 
     // Prepare an array of concurrent fetch promises
-    const fetchPromises = accountsToCheck.map(async ({ name, address }) => {
-      console.log(
-        `[decompressIfNeeded]   → Checking '${name}' (${address.toBase58()})...`
-      );
-
-      // name is already camelCase from IDL metadata
-
-      try {
-        // Try fetching as CPDA first
-        // @ts-ignore
-        const cpdaResult = await rpc.getAccountInfoInterface(
-          address,
-          programId,
-          //@ts-ignore
-          defaultAddressTreeInfo
+    const fetchPromises = accountsToCheck.map(
+      async ({ name, address, ataDerivation }) => {
+        console.log(
+          `[decompressIfNeeded]   → Checking '${name}' (${address.toBase58()})...`
         );
 
-        if (cpdaResult && cpdaResult.merkleContext && cpdaResult.isCompressed) {
+        // Check if this is an ATA variant (seedless token)
+        const metadata = this._lightMetadata?.compressibleAccounts.get(name);
+        if (metadata?.isATA) {
           console.log(
-            `[decompressIfNeeded]     ✓ Account '${name}' is COMPRESSED`
+            `[decompressIfNeeded]     → ATA variant detected, querying by owner+mint`
           );
-          // It's a compressed account
-          if (
-            cpdaResult.accountInfo.owner.equals(
-              CompressedTokenProgram.programId
-            )
-          ) {
-            // It's a compressed token account
-            try {
-              const parsed = parseTokenData(cpdaResult.accountInfo.data);
-              if (parsed) {
-                return {
-                  address,
-                  info: {
-                    accountInfo: cpdaResult.accountInfo,
-                    parsed,
-                    merkleContext: cpdaResult.merkleContext,
-                  },
-                  accountType: "cTokenData",
-                  tokenVariant: name,
-                } as AccountInput;
-              }
-            } catch {
-              // Not a token account, ignore
-            }
-          } else {
-            // It's a compressed program account
-            let parsed = null;
 
-            // Use camelCase name for account client lookup
-            const accountClient = (this._accountNamespace as any)[name];
+          // Prefer derived owner+mint passed from resolution stage
+          const owner = ataDerivation?.owner || null;
+          const mint = ataDerivation?.mint || null;
 
+          if (!owner || !mint) {
             console.log(
-              `[decompressIfNeeded]     → Trying to parse '${name}' using account client '${name}'`
+              `[decompressIfNeeded]     ✗ ATA requires derived owner+mint (ambiguous or not resolved)`
             );
-
-            if (accountClient?.coder) {
-              try {
-                parsed = accountClient.coder.accounts.decode(
-                  name,
-                  cpdaResult.accountInfo.data
-                );
-                console.log(
-                  `[decompressIfNeeded]     ✓ Parsed successfully using decode()`
-                );
-              } catch {
-                try {
-                  parsed = accountClient.coder.accounts.decodeAny(
-                    cpdaResult.accountInfo.data
-                  );
-                  console.log(
-                    `[decompressIfNeeded]     ✓ Parsed successfully using decodeAny()`
-                  );
-                } catch (e) {
-                  console.log(
-                    `[decompressIfNeeded]     ✗ Parsing failed: ${
-                      (e as Error).message
-                    }`
-                  );
-                }
-              }
-            } else {
-              console.log(
-                `[decompressIfNeeded]     ✗ No account client found for '${name}'`
-              );
-            }
-
-            return {
-              address,
-              info: {
-                accountInfo: cpdaResult.accountInfo,
-                parsed,
-                merkleContext: cpdaResult.merkleContext,
-              },
-              accountType: name,
-            } as AccountInput;
+            return undefined;
           }
-        } else {
-          console.log(
-            `[decompressIfNeeded]     ✗ Not compressed via getAccountInfoInterface, trying token fallback...`
-          );
-          // Try as compressed token via getAccountInterface as fallback
+
           try {
-            const tokenRes = await getAccountInterface(
+            const ataResult = await getAtaInterface(
               rpc,
-              address,
-              undefined,
-              CompressedTokenProgram.programId
+              owner,
+              mint,
+              undefined
             );
-            if (tokenRes && (tokenRes as any).merkleContext) {
-              console.log(
-                `[decompressIfNeeded]     ✓ Found via token fallback - COMPRESSED token`
-              );
+
+            if (ataResult.isCompressed && ataResult.merkleContext) {
+              console.log(`[decompressIfNeeded]     ✓ ATA is COMPRESSED`);
               return {
-                address,
-                info: tokenRes as any,
+                address: ataResult.parsed.address,
+                info: {
+                  accountInfo: ataResult.accountInfo,
+                  parsed: ataResult.parsed,
+                  merkleContext: ataResult.merkleContext,
+                },
                 accountType: "cTokenData",
                 tokenVariant: name,
               } as AccountInput;
             } else {
-              console.log(
-                `[decompressIfNeeded]     ✗ Account '${name}' is NOT compressed (no merkleContext)`
-              );
+              console.log(`[decompressIfNeeded]     ✗ ATA is NOT compressed`);
             }
           } catch (err) {
             console.log(
-              `[decompressIfNeeded]     ✗ Token fallback failed: ${
+              `[decompressIfNeeded]     ✗ ATA fetch failed: ${
                 (err as Error).message
               }`
             );
           }
+
+          return undefined;
         }
-      } catch (err) {
-        console.log(
-          `[decompressIfNeeded]     ✗ Error fetching '${name}': ${
-            (err as Error).message
-          }`
-        );
+
+        // name is already camelCase from IDL metadata
+
+        try {
+          // Try fetching as CPDA first
+          // @ts-ignore
+          const cpdaResult = await rpc.getAccountInfoInterface(
+            address,
+            programId,
+            //@ts-ignore
+            defaultAddressTreeInfo
+          );
+
+          if (
+            cpdaResult &&
+            cpdaResult.merkleContext &&
+            cpdaResult.isCompressed
+          ) {
+            console.log(
+              `[decompressIfNeeded]     ✓ Account '${name}' is COMPRESSED`
+            );
+            // It's a compressed account
+            if (
+              cpdaResult.accountInfo.owner.equals(
+                CompressedTokenProgram.programId
+              )
+            ) {
+              // It's a compressed token account
+              try {
+                const parsed = parseTokenData(cpdaResult.accountInfo.data);
+                if (parsed) {
+                  return {
+                    address,
+                    info: {
+                      accountInfo: cpdaResult.accountInfo,
+                      parsed,
+                      merkleContext: cpdaResult.merkleContext,
+                    },
+                    accountType: "cTokenData",
+                    tokenVariant: name,
+                  } as AccountInput;
+                }
+              } catch {
+                // Not a token account, ignore
+              }
+            } else {
+              // It's a compressed program account
+              let parsed = null;
+
+              // Use camelCase name for account client lookup
+              const accountClient = (this._accountNamespace as any)[name];
+
+              console.log(
+                `[decompressIfNeeded]     → Trying to parse '${name}' using account client '${name}'`
+              );
+
+              if (accountClient?.coder) {
+                try {
+                  parsed = accountClient.coder.accounts.decode(
+                    name,
+                    cpdaResult.accountInfo.data
+                  );
+                  console.log(
+                    `[decompressIfNeeded]     ✓ Parsed successfully using decode()`
+                  );
+                } catch {
+                  try {
+                    parsed = accountClient.coder.accounts.decodeAny(
+                      cpdaResult.accountInfo.data
+                    );
+                    console.log(
+                      `[decompressIfNeeded]     ✓ Parsed successfully using decodeAny()`
+                    );
+                  } catch (e) {
+                    console.log(
+                      `[decompressIfNeeded]     ✗ Parsing failed: ${
+                        (e as Error).message
+                      }`
+                    );
+                  }
+                }
+              } else {
+                console.log(
+                  `[decompressIfNeeded]     ✗ No account client found for '${name}'`
+                );
+              }
+
+              return {
+                address,
+                info: {
+                  accountInfo: cpdaResult.accountInfo,
+                  parsed,
+                  merkleContext: cpdaResult.merkleContext,
+                },
+                accountType: name,
+              } as AccountInput;
+            }
+          } else {
+            console.log(
+              `[decompressIfNeeded]     ✗ Not compressed via getAccountInfoInterface, trying token fallback...`
+            );
+            // Try as compressed token via getAccountInterface as fallback
+            try {
+              const tokenRes = await getAccountInterface(
+                rpc,
+                address,
+                undefined,
+                CompressedTokenProgram.programId
+              );
+              if (tokenRes && (tokenRes as any).merkleContext) {
+                console.log(
+                  `[decompressIfNeeded]     ✓ Found via token fallback - COMPRESSED token`
+                );
+                return {
+                  address,
+                  info: tokenRes as any,
+                  accountType: "cTokenData",
+                  tokenVariant: name,
+                } as AccountInput;
+              } else {
+                console.log(
+                  `[decompressIfNeeded]     ✗ Account '${name}' is NOT compressed (no merkleContext)`
+                );
+              }
+            } catch (err) {
+              console.log(
+                `[decompressIfNeeded]     ✗ Token fallback failed: ${
+                  (err as Error).message
+                }`
+              );
+            }
+          }
+        } catch (err) {
+          console.log(
+            `[decompressIfNeeded]     ✗ Error fetching '${name}': ${
+              (err as Error).message
+            }`
+          );
+        }
+        // Return undefined if no compressed account found
+        return undefined;
       }
-      // Return undefined if no compressed account found
-      return undefined;
-    });
+    );
 
     // Run all fetchers concurrently
     const results = await Promise.allSettled(fetchPromises);
@@ -1028,6 +1104,140 @@ export class MethodsBuilder<
   }
 
   /**
+   * Flatten IDL account metadata for the current instruction, preserving signer flags.
+   */
+  private _collectIdlAccountMetas(): Array<{ name: string; signer: boolean }> {
+    const metas: Array<{ name: string; signer: boolean }> = [];
+    const ix: any = this._idlIx as any;
+    const walk = (items: any[]) => {
+      for (const item of items || []) {
+        if (typeof item === "string") continue;
+        if ("accounts" in item && Array.isArray(item.accounts)) {
+          walk(item.accounts);
+        } else if (item && typeof item === "object" && item.name) {
+          metas.push({ name: item.name, signer: !!item.signer });
+        }
+      }
+    };
+    if (ix && Array.isArray(ix.accounts)) {
+      walk(ix.accounts);
+    }
+    return metas;
+  }
+
+  /**
+   * Brute-force resolve an ATA by trying all owner/mint permutations from main accounts.
+   * Returns the first unambiguous match whose derived cATA exists in the main accounts.
+   */
+  private _resolveAtaByBruteForce(accountName: string): {
+    found: boolean;
+    address?: PublicKey;
+    owner?: PublicKey;
+    mint?: PublicKey;
+  } {
+    const programId = this._programId;
+    const idlMetas = this._collectIdlAccountMetas();
+
+    // Collect candidate owners: signer accounts + heuristic names
+    const ownerNameHints = new Set([
+      "owner",
+      "payer",
+      "user",
+      "authority",
+      "admin",
+    ]);
+
+    const ownerCandidates: PublicKey[] = [];
+    const seenOwners = new Set<string>();
+    for (const meta of idlMetas) {
+      const nameLower = String(meta.name || "").toLowerCase();
+      const hinted = [...ownerNameHints].some((h) => nameLower.includes(h));
+      if (!meta.signer && !hinted) continue;
+      if (!this._accounts || !(meta.name in this._accounts)) continue;
+      try {
+        const pk = translateAddress(this._accounts[meta.name] as Address);
+        if (!pk.equals(programId)) {
+          const s = pk.toBase58();
+          if (!seenOwners.has(s)) {
+            ownerCandidates.push(pk);
+            seenOwners.add(s);
+          }
+        }
+      } catch {}
+    }
+
+    // Collect candidate mints: account names containing "mint"
+    const mintCandidates: PublicKey[] = [];
+    const seenMints = new Set<string>();
+    if (this._accounts) {
+      for (const [name, value] of Object.entries(this._accounts)) {
+        const nameLower = name.toLowerCase();
+        if (!nameLower.includes("mint")) continue;
+        try {
+          const pk = translateAddress(value as Address);
+          if (!pk.equals(programId)) {
+            const s = pk.toBase58();
+            if (!seenMints.has(s)) {
+              mintCandidates.push(pk);
+              seenMints.add(s);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (ownerCandidates.length === 0 || mintCandidates.length === 0) {
+      return { found: false };
+    }
+
+    // Build a set of all main accounts for matching
+    const mainAddresses = new Set<string>();
+    if (this._accounts) {
+      for (const value of Object.values(this._accounts)) {
+        try {
+          const pk = translateAddress(value as Address);
+          if (!pk.equals(programId)) mainAddresses.add(pk.toBase58());
+        } catch {}
+      }
+    }
+
+    let match: {
+      address: PublicKey;
+      owner: PublicKey;
+      mint: PublicKey;
+    } | null = null;
+
+    for (const owner of ownerCandidates) {
+      for (const mint of mintCandidates) {
+        try {
+          const [derivedAta] = getAssociatedCTokenAddressAndBump(owner, mint);
+          const derivedStr = derivedAta.toBase58();
+          if (mainAddresses.has(derivedStr)) {
+            // If we've already found a different match, it's ambiguous → bail
+            if (match && !match.address.equals(derivedAta)) {
+              return { found: false };
+            }
+            match = { address: derivedAta, owner, mint };
+          }
+        } catch {}
+      }
+    }
+
+    if (!match) return { found: false };
+    // Store for fetch stage
+    this._ataDerivations[accountName] = {
+      owner: match.owner,
+      mint: match.mint,
+    };
+    return {
+      found: true,
+      address: match.address,
+      owner: match.owner,
+      mint: match.mint,
+    };
+  }
+
+  /**
    * Internal method to inject decompress instruction if needed.
    *
    * Uses _lightMetadata (extracted from IDL enums) as canonical reference for all compressible accounts.
@@ -1092,6 +1302,7 @@ export class MethodsBuilder<
     const compressibleAccountsToCheck: Array<{
       name: string;
       address: PublicKey;
+      ataDerivation?: { owner: PublicKey; mint: PublicKey };
     }> = [];
     const resolvedAddresses = new Set<string>(); // Track which addresses have been claimed
 
@@ -1185,6 +1396,23 @@ export class MethodsBuilder<
         console.log(
           `[decompressIfNeeded] ✗ P3 Seed-based: no seeds defined for this account`
         );
+        // If this is a seedless token, attempt ATA brute-force resolution by owner/mint
+        if (metadata.accountType === "token") {
+          console.log(
+            `[decompressIfNeeded] → Attempting ATA brute-force resolution for '${accountName}'`
+          );
+          const ata = this._resolveAtaByBruteForce(accountName);
+          if (ata.found && ata.address) {
+            resolved = ata.address;
+            console.log(
+              `[decompressIfNeeded] ✓ ATA brute-force: derived ${resolved.toBase58()} (owner=${ata.owner?.toBase58()}, mint=${ata.mint?.toBase58()})`
+            );
+          } else {
+            console.log(
+              `[decompressIfNeeded] ✗ ATA brute-force: no unambiguous match`
+            );
+          }
+        }
       }
 
       // Priority 4: Try brute-force matching by trying all combinations of accounts as seeds
@@ -1530,9 +1758,11 @@ export class MethodsBuilder<
 
       if (resolved) {
         completeAccounts[accountName] = resolved;
+        const ataDer = this._ataDerivations[accountName];
         compressibleAccountsToCheck.push({
           name: accountName,
           address: resolved,
+          ataDerivation: ataDer,
         });
         resolvedAddresses.add(resolved.toBase58()); // Mark this address as claimed
         console.log(
