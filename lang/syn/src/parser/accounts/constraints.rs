@@ -1152,7 +1152,7 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
 
             // Mint.
             if let Some(mint_decimals) = &self.mint_decimals {
-                if self.mint_authority.is_none() {
+                if self.mint_authority.is_none() && self.ctoken_mint_authority.is_none() {
                     return Err(ParseError::new(
                         mint_decimals.span(),
                         "when initializing, mint authority must be provided if mint decimals is",
@@ -1160,9 +1160,17 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                 }
             }
             if let Some(mint_authority) = &self.mint_authority {
-                if self.mint_decimals.is_none() {
+                if self.mint_decimals.is_none() && self.ctoken_mint_decimals.is_none() {
                     return Err(ParseError::new(
                         mint_authority.span(),
+                        "when initializing, mint decimals must be provided if mint authority is",
+                    ));
+                }
+            }
+            if let Some(ctoken_mint_authority) = &self.ctoken_mint_authority {
+                if self.mint_decimals.is_none() && self.ctoken_mint_decimals.is_none() {
+                    return Err(ParseError::new(
+                        ctoken_mint_authority.span(),
                         "when initializing, mint decimals must be provided if mint authority is",
                     ));
                 }
@@ -1505,12 +1513,20 @@ impl<'ty> ConstraintGroupBuilder<'ty> {
                 } else if let Some(d) = &mint_decimals {
                     InitKind::Mint {
                         decimals: d.clone().into_inner().decimals,
+                        // For SPL/Token-2022 mints, accept `mint::authority = ...` even if the
+                        // parser initially stored it in the CToken bucket. Prefer the SPL value
+                        // when present and fall back to the CToken value otherwise.
                         owner: match &mint_authority {
                             Some(a) => a.clone().into_inner().mint_auth,
-                            None => return Err(ParseError::new(
-                                d.span(),
-                                "authority must be provided to initialize a mint program derived address"
-                            ))
+                            None => match &ctoken_mint_authority {
+                                Some(ct) => ct.clone().into_inner().authority,
+                                None => {
+                                    return Err(ParseError::new(
+                                        d.span(),
+                                        "authority must be provided to initialize a mint program derived address",
+                                    ))
+                                }
+                            }
                         },
                         freeze_authority: mint_freeze_authority.map(|fa| fa.into_inner().mint_freeze_auth),
                         token_program: mint_token_program.map(|tp| tp.into_inner().token_program),
