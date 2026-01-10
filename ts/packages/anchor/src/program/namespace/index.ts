@@ -56,12 +56,20 @@ export default class NamespaceFactory {
       ? AccountFactory.build(idl, coder, programId, provider)
       : ({} as AccountNamespace<IDL>);
 
+    // First pass: build all instruction functions
+    const allInstructionFns: Record<string, any> = {};
     idl.instructions.forEach((idlIx) => {
       const ixItem = InstructionFactory.build<IDL, typeof idlIx>(
         idlIx,
         (ixName, ix) => coder.instruction.encode(ixName, ix),
         programId
       );
+      allInstructionFns[idlIx.name] = ixItem;
+    });
+
+    // Second pass: build all other namespaces with access to all instruction functions
+    idl.instructions.forEach((idlIx) => {
+      const ixItem = allInstructionFns[idlIx.name];
       const txItem = TransactionFactory.build(idlIx, ixItem);
       const rpcItem = RpcFactory.build(idlIx, txItem, idlErrors, provider);
       const simulateItem = SimulateFactory.build(
@@ -85,7 +93,9 @@ export default class NamespaceFactory {
         viewItem,
         account,
         idl.types || [],
-        getCustomResolver?.(idlIx)
+        getCustomResolver?.(idlIx),
+        idl,
+        allInstructionFns
       );
       const name = idlIx.name;
 
