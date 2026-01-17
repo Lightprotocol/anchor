@@ -57,7 +57,14 @@ pub struct Mint(spl_token_2022::state::Mint);
 
 impl anchor_lang::AccountDeserialize for Mint {
     fn try_deserialize_unchecked(buf: &mut &[u8]) -> anchor_lang::Result<Self> {
-        spl_token_2022::extension::StateWithExtensions::<spl_token_2022::state::Mint>::unpack(buf)
+        // If >= 166 bytes, validate account type byte is Mint (1)
+        if buf.len() >= 166 && buf[165] != 1 {
+            return Err(anchor_lang::error::ErrorCode::AccountDidNotDeserialize.into());
+        }
+
+        // Deserialize base mint only (82 bytes)
+        let base_slice = &buf[..spl_token_2022::state::Mint::LEN];
+        spl_token_2022::extension::StateWithExtensions::<spl_token_2022::state::Mint>::unpack(base_slice)
             .map(|t| Mint(t.base))
             .map_err(Into::into)
     }
