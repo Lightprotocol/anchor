@@ -23,8 +23,31 @@ static IDS: [Pubkey; 3] = [
     COMPRESSED_TOKEN_ID,
 ];
 
+macro_rules! impl_empty_idl_build {
+    ($ty:ty) => {
+        impl $ty {
+            pub const DISCRIMINATOR: &'static [u8] = &[];
+
+            pub fn create_type() -> Option<anchor_lang_idl::types::IdlTypeDef> {
+                None
+            }
+
+            pub fn insert_types(
+                _types: &mut std::collections::BTreeMap<String, anchor_lang_idl::types::IdlTypeDef>,
+            ) {
+            }
+
+            pub fn get_full_path() -> String {
+                std::any::type_name::<Self>().into()
+            }
+        }
+    };
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Copy)]
 pub struct TokenAccount(spl_token_2022::state::Account);
+
+impl_empty_idl_build!(TokenAccount);
 
 impl anchor_lang::AccountDeserialize for TokenAccount {
     fn try_deserialize_unchecked(buf: &mut &[u8]) -> anchor_lang::Result<Self> {
@@ -54,6 +77,8 @@ impl Deref for TokenAccount {
 
 #[derive(Clone, Debug, Default, PartialEq, Copy)]
 pub struct Mint(spl_token_2022::state::Mint);
+
+impl_empty_idl_build!(Mint);
 
 impl anchor_lang::AccountDeserialize for Mint {
     fn try_deserialize_unchecked(buf: &mut &[u8]) -> anchor_lang::Result<Self> {

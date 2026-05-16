@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 pub use mpl_token_metadata::{self, ID};
 use {
     anchor_lang::{

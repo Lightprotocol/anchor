@@ -33,9 +33,10 @@ token_2022_extensions = [
 
 [dependencies]
 anchor-lang = { version = "1.0.2", features = ["derive"] }
+anchor-lang-idl = { version = "0.1.2" }
 borsh = { version = "1.5.7", optional = true }
 mpl-token-metadata = { version = "=5.1.2-alpha.2", optional = true }
-solana-stake-interface = { workspace = true, features = ["borsh"], optional = true }
+solana-stake-interface = { version = "2.0", features = ["borsh"], optional = true }
 solana-sysvar = { version = "3", optional = true }
 spl-associated-token-account-interface = { version = "2", optional = true }
 spl-memo-interface = { version = "2", optional = true }

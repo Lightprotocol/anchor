@@ -2937,6 +2937,7 @@ name = "light-anchor-spl"
 version = "1.0.2"
 dependencies = [
  "anchor-lang 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "anchor-lang-idl 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "borsh 1.6.1",
  "mpl-token-metadata",
  "solana-stake-interface",

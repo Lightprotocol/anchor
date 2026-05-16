@@ -37,6 +37,8 @@ mod legacy {
         serde::{Deserialize, Serialize},
     };
 
+    use crate::types as t;
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct Idl {
         pub version: String,

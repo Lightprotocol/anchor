@@ -10,6 +10,27 @@ use {
 };
 pub use {spl_token::ID, spl_token_interface as spl_token};
 
+macro_rules! impl_empty_idl_build {
+    ($ty:ty) => {
+        impl $ty {
+            pub const DISCRIMINATOR: &'static [u8] = &[];
+
+            pub fn create_type() -> Option<anchor_lang_idl::types::IdlTypeDef> {
+                None
+            }
+
+            pub fn insert_types(
+                _types: &mut std::collections::BTreeMap<String, anchor_lang_idl::types::IdlTypeDef>,
+            ) {
+            }
+
+            pub fn get_full_path() -> String {
+                std::any::type_name::<Self>().into()
+            }
+        }
+    };
+}
+
 pub fn transfer<'info>(
     ctx: CpiContext<'_, '_, '_, 'info, Transfer<'info>>,
     amount: u64,
@@ -443,6 +464,8 @@ pub struct SyncNative<'info> {
 #[derive(Clone, Debug, Default, PartialEq, Copy)]
 pub struct TokenAccount(spl_token::state::Account);
 
+impl_empty_idl_build!(TokenAccount);
+
 impl TokenAccount {
     pub const LEN: usize = spl_token::state::Account::LEN;
 }
@@ -473,6 +496,8 @@ impl Deref for TokenAccount {
 
 #[derive(Clone, Debug, Default, PartialEq, Copy)]
 pub struct Mint(spl_token::state::Mint);
+
+impl_empty_idl_build!(Mint);
 
 impl Mint {
     pub const LEN: usize = spl_token::state::Mint::LEN;
