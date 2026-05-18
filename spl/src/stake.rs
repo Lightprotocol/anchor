@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use {
     anchor_lang::{
         context::CpiContext,
