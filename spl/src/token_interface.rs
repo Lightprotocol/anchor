@@ -89,9 +89,11 @@ impl anchor_lang::AccountDeserialize for Mint {
 
         // Deserialize base mint only (82 bytes)
         let base_slice = &buf[..spl_token_2022::state::Mint::LEN];
-        spl_token_2022::extension::StateWithExtensions::<spl_token_2022::state::Mint>::unpack(base_slice)
-            .map(|t| Mint(t.base))
-            .map_err(Into::into)
+        spl_token_2022::extension::StateWithExtensions::<spl_token_2022::state::Mint>::unpack(
+            base_slice,
+        )
+        .map(|t| Mint(t.base))
+        .map_err(Into::into)
     }
 }
 
